@@ -74,7 +74,7 @@ _BOOTSTRAP_RULES: dict[str, str] = {
 
 
 def seed_categories(session: Session) -> int:
-    existing = {c.name for c in session.execute(select(Category.name)).scalars()}
+    existing = set(session.execute(select(Category.name)).scalars())
     added = 0
     for idx, cat in enumerate(all_categories()):
         if cat.name in existing:
