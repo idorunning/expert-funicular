@@ -2,7 +2,16 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMainWindow, QMessageBox, QStackedWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..auth.service import logout
 from .admin_users_view import AdminUsersView
@@ -11,16 +20,56 @@ from .clients_view import ClientsView
 from .login_view import LoginView
 from .review_view import ReviewView
 from .settings_view import SettingsView
+from .theme import load_logo_pixmap
+
+
+class _BrandHeader(QFrame):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("BrandHeader")
+        self.setFixedHeight(72)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(20, 12, 20, 12)
+        row.setSpacing(14)
+
+        self.logo = QLabel()
+        pm = load_logo_pixmap(height=44)
+        if not pm.isNull():
+            self.logo.setPixmap(pm)
+        else:
+            self.logo.setText("")
+        row.addWidget(self.logo)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(0)
+        title = QLabel("BrokerLedger")
+        title.setObjectName("BrandTitle")
+        subtitle = QLabel("Mortgage affordability, fully local")
+        subtitle.setObjectName("BrandSubtitle")
+        text_col.addWidget(title)
+        text_col.addWidget(subtitle)
+        row.addLayout(text_col)
+        row.addStretch(1)
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("BrokerLedger")
-        self.resize(1200, 780)
+        self.setWindowTitle("BrokerLedger — Mortgage Oasis")
+        self.resize(1280, 820)
+
+        container = QWidget()
+        container.setObjectName("centralWidget")
+        root = QVBoxLayout(container)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self.header = _BrandHeader()
+        root.addWidget(self.header)
 
         self.stack = QStackedWidget()
-        self.setCentralWidget(self.stack)
+        root.addWidget(self.stack, 1)
+        self.setCentralWidget(container)
 
         self.login = LoginView()
         self.clients = ClientsView()

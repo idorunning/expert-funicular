@@ -11,6 +11,8 @@ class RecategorizeWorker(QObject):
     progress = Signal(int, int, str)   # (done, total, message)
     done = Signal(int)                 # count of rows updated
     error = Signal(str)
+    tx_categorized = Signal(str, str, object, str)  # (category, group, amount, direction)
+    starting = Signal()                # emitted before first tx so UI can reset totals
 
     def __init__(self, client_id: int, current_user) -> None:
         super().__init__()
@@ -21,7 +23,12 @@ class RecategorizeWorker(QObject):
         from ...auth.session import set_current
         set_current(self._current_user)
         try:
-            count = recategorize_client(self.client_id, progress_cb=self._on_progress)
+            self.starting.emit()
+            count = recategorize_client(
+                self.client_id,
+                progress_cb=self._on_progress,
+                tx_cb=self._on_decision,
+            )
             self.done.emit(count)
         except Exception as e:  # noqa: BLE001
             logger.exception("Recategorize failed for client {}", self.client_id)
@@ -30,6 +37,9 @@ class RecategorizeWorker(QObject):
 
     def _on_progress(self, done: int, total: int) -> None:
         self.progress.emit(done, total, f"Re-categorising… {done}/{total}")
+
+    def _on_decision(self, category: str, group: str, amount, direction: str) -> None:
+        self.tx_categorized.emit(category or "", group or "", amount, direction or "")
 
 
 def run_recategorize_in_thread(client_id: int):

@@ -132,8 +132,14 @@ def categorize_statement(
     *,
     llm: LLMClient | None = None,
     progress_cb=None,
+    tx_cb=None,
 ) -> int:
-    """Categorise every transaction on a statement. Returns # rows updated."""
+    """Categorise every transaction on a statement. Returns # rows updated.
+
+    ``tx_cb(category, group, amount, direction)`` — optional callback invoked
+    after each decision so the UI can stream running totals while the LLM
+    still processes the rest of the file.
+    """
     llm = llm or get_llm_client()
     updated = 0
     with session_scope() as s:
@@ -152,7 +158,6 @@ def categorize_statement(
                 client_id=tx.client_id,
                 llm=llm,
             )
-            # Credits default to income unless the rule/LLM said otherwise.
             if tx.direction == "credit" and decision.group not in {GROUP_INCOME, GROUP_EXCLUDED}:
                 decision = Decision(
                     category="Other income",
@@ -172,6 +177,8 @@ def categorize_statement(
             updated += 1
             if progress_cb is not None:
                 progress_cb(idx + 1, total)
+            if tx_cb is not None:
+                tx_cb(decision.category, decision.group, tx.amount, tx.direction)
         s.commit()
     return updated
 
@@ -209,6 +216,7 @@ def recategorize_client(
     *,
     llm: LLMClient | None = None,
     progress_cb=None,
+    tx_cb=None,
 ) -> int:
     """Re-run AI categorisation on all non-user transactions for a client.
 
@@ -257,5 +265,7 @@ def recategorize_client(
             updated += 1
             if progress_cb is not None:
                 progress_cb(idx + 1, total)
+            if tx_cb is not None:
+                tx_cb(decision.category, decision.group, tx.amount, tx.direction)
         s.commit()
     return updated

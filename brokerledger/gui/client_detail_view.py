@@ -4,12 +4,15 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -17,15 +20,35 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from ..affordability.calculator import compute_for_client
+from ..categorize.taxonomy import (
+    COMMITTED_CATEGORIES,
+    DISCRETIONARY_CATEGORIES,
+    EXCLUDED_CATEGORIES,
+    GROUP_EXCLUDED,
+    GROUP_INCOME,
+    INCOME_CATEGORIES,
+    group_of,
+)
 from ..export.xlsx import export_client_workbook
+from .theme import BRAND_MAGENTA, BRAND_PURPLE_SOFT, SUCCESS
 from .widgets.dropzone import DropZone
 from .workers.ingest_worker import run_ingest_in_thread
 from .workers.recategorize_worker import run_recategorize_in_thread
+
+
+_ALL_CATEGORIES: tuple[str, ...] = tuple(
+    list(COMMITTED_CATEGORIES)
+    + list(DISCRETIONARY_CATEGORIES)
+    + list(INCOME_CATEGORIES)
+    + list(EXCLUDED_CATEGORIES)
+)
 
 
 class ClientDetailView(QWidget):
@@ -100,6 +123,12 @@ class ClientDetailView(QWidget):
     def _build_affordability_panel(self) -> QGroupBox:
         group = QGroupBox("Affordability summary")
         outer = QVBoxLayout(group)
+        outer.setSpacing(10)
+
+        self.live_status = QLabel("")
+        self.live_status.setWordWrap(True)
+        self.live_status.setVisible(False)
+        outer.addWidget(self.live_status)
 
         form = QFormLayout()
         self.declared = QLineEdit()
@@ -127,6 +156,30 @@ class ClientDetailView(QWidget):
         grid.addRow("Monthly net disposable", self.l_monthly_net)
         outer.addLayout(grid)
 
+        breakdown_label = QLabel("<b>Category breakdown</b>  "
+                                 "<span style='color:#6B6679'>— updates live as the AI processes transactions</span>")
+        outer.addWidget(breakdown_label)
+
+        self.category_table = QTableWidget()
+        self.category_table.setColumnCount(4)
+        self.category_table.setHorizontalHeaderLabels(["Category", "Group", "Count", "Total"])
+        self.category_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.category_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.category_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.category_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.category_table.verticalHeader().setVisible(False)
+        self.category_table.setAlternatingRowColors(True)
+        self.category_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.category_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.category_table.setMinimumHeight(220)
+        outer.addWidget(self.category_table)
+
+        self._category_rows: dict[str, int] = {}
+        self._live_totals: dict[str, tuple[int, Decimal]] = {}
+        self._live_mode: bool = False
+        self._flash_timers: dict[int, QTimer] = {}
+        self._populate_category_rows()
+
         buttons = QHBoxLayout()
         recalculate_btn = QPushButton("Recalculate")
         recalculate_btn.setToolTip("Recalculate affordability from current transaction categories")
@@ -138,6 +191,10 @@ class ClientDetailView(QWidget):
         )
         self.recategorize_btn.clicked.connect(self._start_recategorize)
         buttons.addWidget(self.recategorize_btn)
+        self.review_btn = QPushButton("Review transactions →")
+        self.review_btn.setObjectName("GhostButton")
+        self.review_btn.clicked.connect(self.review_requested.emit)
+        buttons.addWidget(self.review_btn)
         buttons.addStretch(1)
         export_btn = QPushButton("Export XLSX…")
         export_btn.clicked.connect(self._export)
@@ -145,6 +202,22 @@ class ClientDetailView(QWidget):
         outer.addLayout(buttons)
 
         return group
+
+    def _populate_category_rows(self) -> None:
+        self.category_table.setRowCount(len(_ALL_CATEGORIES))
+        self._category_rows.clear()
+        for idx, cat in enumerate(_ALL_CATEGORIES):
+            self._category_rows[cat] = idx
+            name_item = QTableWidgetItem(cat)
+            group_item = QTableWidgetItem(group_of(cat))
+            count_item = QTableWidgetItem("0")
+            count_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            total_item = QTableWidgetItem("£0.00")
+            total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.category_table.setItem(idx, 0, name_item)
+            self.category_table.setItem(idx, 1, group_item)
+            self.category_table.setItem(idx, 2, count_item)
+            self.category_table.setItem(idx, 3, total_item)
 
     def refresh(self) -> None:
         declared = self._declared_income()
@@ -160,6 +233,90 @@ class ClientDetailView(QWidget):
         self.l_net.setText(f"£{report.net_disposable:,.2f}")
         self.l_monthly_income.setText(f"£{report.monthly_income:,.2f}")
         self.l_monthly_net.setText(f"£{report.monthly_net_disposable:,.2f}")
+        if not self._live_mode:
+            self._populate_breakdown_from_report(report)
+
+    def _populate_breakdown_from_report(self, report) -> None:
+        for cat, row in self._category_rows.items():
+            totals = report.per_category.get(cat)
+            if totals is None:
+                count, total = 0, Decimal("0.00")
+            else:
+                count, total = totals.count, totals.total
+            self.category_table.item(row, 2).setText(f"{count}")
+            self.category_table.item(row, 3).setText(f"£{total:,.2f}")
+
+    def _reset_live_totals(self) -> None:
+        self._live_totals = {cat: (0, Decimal("0.00")) for cat in _ALL_CATEGORIES}
+        for cat, row in self._category_rows.items():
+            self.category_table.item(row, 2).setText("0")
+            self.category_table.item(row, 3).setText("£0.00")
+
+    def _on_tx_categorized(self, category: str, group: str, amount, direction: str) -> None:
+        if not category:
+            return
+        if category not in self._category_rows:
+            # LLM returned a category we don't track — ignore for live view.
+            return
+        try:
+            amt_abs = abs(Decimal(str(amount)))
+        except (InvalidOperation, TypeError):
+            amt_abs = Decimal("0.00")
+        count, total = self._live_totals.get(category, (0, Decimal("0.00")))
+        # Credits routed to income are shown as positive too; no sign flip needed.
+        count += 1
+        total += amt_abs
+        self._live_totals[category] = (count, total)
+        row = self._category_rows[category]
+        self.category_table.item(row, 2).setText(f"{count}")
+        self.category_table.item(row, 3).setText(f"£{total:,.2f}")
+        self._flash_row(row)
+        self._update_live_status()
+
+    def _flash_row(self, row: int) -> None:
+        highlight = QBrush(QColor(BRAND_MAGENTA))
+        default = QBrush(QColor(BRAND_PURPLE_SOFT)) if row % 2 else QBrush(Qt.GlobalColor.white)
+        fg_white = QBrush(QColor("#FFFFFF"))
+        fg_default = QBrush(QColor("#1F1030"))
+        for col in range(self.category_table.columnCount()):
+            item = self.category_table.item(row, col)
+            if item is not None:
+                item.setBackground(highlight)
+                item.setForeground(fg_white)
+        existing = self._flash_timers.pop(row, None)
+        if existing is not None:
+            existing.stop()
+        t = QTimer(self)
+        t.setSingleShot(True)
+        t.timeout.connect(lambda r=row, d=default, f=fg_default: self._clear_flash(r, d, f))
+        t.start(450)
+        self._flash_timers[row] = t
+
+    def _clear_flash(self, row: int, bg: QBrush, fg: QBrush) -> None:
+        for col in range(self.category_table.columnCount()):
+            item = self.category_table.item(row, col)
+            if item is not None:
+                item.setBackground(bg)
+                item.setForeground(fg)
+        self._flash_timers.pop(row, None)
+
+    def _update_live_status(self) -> None:
+        if not self._live_mode:
+            return
+        total_count = sum(c for c, _ in self._live_totals.values())
+        self.live_status.setText(
+            f"<span style='color:{BRAND_MAGENTA};font-weight:600'>● Live</span> "
+            f"— {total_count} transaction(s) categorised so far"
+        )
+        self.live_status.setVisible(True)
+
+    def _finish_live_mode(self, ok_msg: str) -> None:
+        self._live_mode = False
+        self.live_status.setText(
+            f"<span style='color:{SUCCESS};font-weight:600'>✓ Ready for review</span> — {ok_msg}"
+        )
+        self.live_status.setVisible(True)
+        self.refresh()
 
     def _declared_income(self) -> Decimal | None:
         raw = self.declared.text().strip()
@@ -228,6 +385,10 @@ class ClientDetailView(QWidget):
         self.progress_label.setVisible(True)
         self.progress_label.setText(f"Starting — {len(paths)} file(s) queued…")
 
+        self._live_mode = True
+        self._reset_live_totals()
+        self._update_live_status()
+
         thread, worker = run_ingest_in_thread(self.client_id, paths)
         self._thread = thread
         self._worker = worker
@@ -235,6 +396,7 @@ class ClientDetailView(QWidget):
         worker.file_done.connect(self._on_file_done)
         worker.error.connect(self._on_file_error)
         worker.all_done.connect(self._on_all_done)
+        worker.tx_categorized.connect(self._on_tx_categorized)
         # CRITICAL: keep the Python references alive until thread.finished
         # actually fires (the event loop has fully exited). Otherwise GC may
         # destroy the QThread wrapper while Qt is still cleaning up, producing
@@ -319,7 +481,11 @@ class ClientDetailView(QWidget):
         self._pending_paths.clear()
         self._queue_items.clear()
         self._update_buttons()
-        self.refresh()
+        self._finish_live_mode(
+            f"{ok} file(s) processed — review the category totals below or open 'Review transactions'"
+            if fail == 0
+            else f"{ok} imported, {fail} failed — review totals below"
+        )
 
     def _on_thread_finished(self) -> None:
         # Fires after the QThread's event loop has fully exited. Safe to drop
@@ -341,12 +507,17 @@ class ClientDetailView(QWidget):
         self.progress_label.setVisible(True)
         self.progress_label.setText("Starting re-categorisation…")
 
+        self._live_mode = True
+        self._reset_live_totals()
+        self._update_live_status()
+
         thread, worker = run_recategorize_in_thread(self.client_id)
         self._recategorize_thread = thread
         self._recategorize_worker = worker
         worker.progress.connect(self._on_progress)
         worker.done.connect(self._on_recategorize_done)
         worker.error.connect(self._on_recategorize_error)
+        worker.tx_categorized.connect(self._on_tx_categorized)
         thread.finished.connect(self._on_recategorize_thread_finished)
         thread.start()
         self._update_buttons()
@@ -361,11 +532,12 @@ class ClientDetailView(QWidget):
                 f"<span style='color:#176b1a;font-weight:bold'>✓ Re-categorisation complete</span>"
                 f" — {count} transaction(s) updated"
             )
+            self._finish_live_mode(f"{count} transaction(s) re-categorised")
         else:
             self.progress_label.setText(
                 "<span style='color:#555'>No transactions needed re-categorisation.</span>"
             )
-        self.refresh()
+            self._finish_live_mode("no transactions needed updating")
 
     def _on_recategorize_error(self, message: str) -> None:
         QMessageBox.critical(self, "Re-categorisation failed", message)

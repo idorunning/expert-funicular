@@ -11,6 +11,7 @@ from .db.engine import init_engine
 from .db.seed import run_all_seeds
 from .gui.first_run import FirstRunDialog
 from .gui.main_window import MainWindow
+from .gui.theme import apply_theme
 from .utils.logging import configure_logging, logger
 
 
@@ -22,6 +23,7 @@ def run() -> int:
     logger.info("BrokerLedger starting — data at {}", paths.app_data_dir())
 
     app = QApplication.instance() or QApplication(sys.argv)
+    apply_theme(app)
 
     if user_count() == 0:
         wiz = FirstRunDialog()

@@ -15,6 +15,7 @@ class IngestWorker(QObject):
     file_done = Signal(object)          # IngestResult
     all_done = Signal(int, int)         # (success_count, failure_count)
     error = Signal(str, str)            # (file_name, message)
+    tx_categorized = Signal(str, str, object, str)  # (category, group, amount Decimal, direction)
 
     def __init__(self, client_id: int, paths: list[Path], current_user) -> None:
         super().__init__()
@@ -44,7 +45,10 @@ class IngestWorker(QObject):
                             _total * 100,
                             f"Categorising {_name}…  {tx_done}/{tx_total} transactions  ({pct}%)"
                         )
-                    categorize_statement(result.statement_id, progress_cb=_tx_cb)
+
+                    def _decision_cb(category: str, group: str, amount, direction: str) -> None:
+                        self.tx_categorized.emit(category or "", group or "", amount, direction or "")
+                    categorize_statement(result.statement_id, progress_cb=_tx_cb, tx_cb=_decision_cb)
                 self.file_done.emit(result)
                 ok += 1
             except IngestError as e:
