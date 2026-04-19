@@ -1,13 +1,16 @@
 """Client detail view — import drop zone + affordability summary + actions."""
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QDate, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
+    QDateEdit,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -49,6 +52,21 @@ _ALL_CATEGORIES: tuple[str, ...] = tuple(
     + list(INCOME_CATEGORIES)
     + list(EXCLUDED_CATEGORIES)
 )
+
+
+def _months_ago(anchor: date, months: int) -> date:
+    year = anchor.year
+    month = anchor.month - months
+    while month <= 0:
+        month += 12
+        year -= 1
+    # Clamp day to last-of-month if the original day is out of range.
+    day = anchor.day
+    while True:
+        try:
+            return date(year, month, day)
+        except ValueError:
+            day -= 1
 
 
 class ClientDetailView(QWidget):
@@ -135,6 +153,37 @@ class ClientDetailView(QWidget):
         self.declared.setPlaceholderText("Override declared income (optional)")
         self.declared.editingFinished.connect(self.refresh)
         form.addRow("Declared income", self.declared)
+
+        self.range_preset = QComboBox()
+        self.range_preset.addItems([
+            "All transactions",
+            "Last 3 months",
+            "Last 6 months",
+            "Last 12 months",
+            "Custom…",
+        ])
+        self.range_preset.currentIndexChanged.connect(self._on_range_preset_changed)
+        form.addRow("Date range", self.range_preset)
+
+        range_row = QHBoxLayout()
+        today = QDate.currentDate()
+        self.range_from = QDateEdit()
+        self.range_from.setCalendarPopup(True)
+        self.range_from.setDisplayFormat("yyyy-MM-dd")
+        self.range_from.setDate(today.addMonths(-3))
+        self.range_from.setEnabled(False)
+        self.range_from.dateChanged.connect(self._on_custom_range_changed)
+        self.range_to = QDateEdit()
+        self.range_to.setCalendarPopup(True)
+        self.range_to.setDisplayFormat("yyyy-MM-dd")
+        self.range_to.setDate(today)
+        self.range_to.setEnabled(False)
+        self.range_to.dateChanged.connect(self._on_custom_range_changed)
+        range_row.addWidget(self.range_from)
+        range_row.addWidget(QLabel("→"))
+        range_row.addWidget(self.range_to)
+        range_row.addStretch(1)
+        form.addRow("", self._wrap(range_row))
         outer.addLayout(form)
 
         grid = QFormLayout()
@@ -219,9 +268,48 @@ class ClientDetailView(QWidget):
             self.category_table.setItem(idx, 2, count_item)
             self.category_table.setItem(idx, 3, total_item)
 
+    def _wrap(self, inner_layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(inner_layout)
+        return w
+
+    def _active_date_range(self) -> tuple[date | None, date | None]:
+        idx = self.range_preset.currentIndex()
+        today = date.today()
+        if idx == 0:  # All
+            return None, None
+        if idx == 1:  # Last 3 months
+            return _months_ago(today, 3), today
+        if idx == 2:  # Last 6 months
+            return _months_ago(today, 6), today
+        if idx == 3:  # Last 12 months
+            return _months_ago(today, 12), today
+        # Custom
+        start = self.range_from.date().toPython()
+        end = self.range_to.date().toPython()
+        if end < start:
+            start, end = end, start
+        return start, end
+
+    def _on_range_preset_changed(self, idx: int) -> None:
+        is_custom = idx == 4
+        self.range_from.setEnabled(is_custom)
+        self.range_to.setEnabled(is_custom)
+        self.refresh()
+
+    def _on_custom_range_changed(self, _qdate) -> None:
+        if self.range_preset.currentIndex() == 4:
+            self.refresh()
+
     def refresh(self) -> None:
         declared = self._declared_income()
-        report = compute_for_client(self.client_id, declared_income=declared)
+        date_start, date_end = self._active_date_range()
+        report = compute_for_client(
+            self.client_id,
+            declared_income=declared,
+            date_start=date_start,
+            date_end=date_end,
+        )
         if report.period_start and report.period_end:
             self.l_period.setText(f"{report.period_start.isoformat()} → {report.period_end.isoformat()}")
         else:

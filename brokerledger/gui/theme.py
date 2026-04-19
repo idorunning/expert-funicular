@@ -80,6 +80,11 @@ QLabel#BrandSubtitle {{
     color: rgba(255, 255, 255, 0.75);
     font-size: 12px;
 }}
+QLabel#BrandUserLabel {{
+    color: #FFFFFF;
+    font-weight: 600;
+    padding-right: 8px;
+}}
 QFrame#BrandHeader {{
     background: qlineargradient(
         x1:0, y1:1, x2:1, y2:0,

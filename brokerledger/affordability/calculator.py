@@ -83,11 +83,20 @@ def _months_between(start: date, end: date) -> float:
     return max(whole_months, 1.0)
 
 
-def compute_for_client(client_id: int, declared_income: Decimal | None = None) -> AffordabilityReport:
+def compute_for_client(
+    client_id: int,
+    declared_income: Decimal | None = None,
+    *,
+    date_start: date | None = None,
+    date_end: date | None = None,
+) -> AffordabilityReport:
     with session_scope() as s:
-        rows = s.execute(
-            select(Transaction).where(Transaction.client_id == client_id)
-        ).scalars().all()
+        q = select(Transaction).where(Transaction.client_id == client_id)
+        if date_start is not None:
+            q = q.where(Transaction.posted_date >= date_start.isoformat())
+        if date_end is not None:
+            q = q.where(Transaction.posted_date <= date_end.isoformat())
+        rows = s.execute(q).scalars().all()
 
     if not rows:
         return AffordabilityReport(

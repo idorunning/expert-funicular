@@ -11,9 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from .. import paths
-from ..auth.session import require_login
+from ..auth.session import require_admin, require_login
 from ..db.engine import session_scope
-from ..db.models import AuditLog, Client, utcnow
+from ..db.models import AuditLog, Client, User, utcnow
 
 
 @dataclass(frozen=True)
@@ -122,3 +122,57 @@ def archive_client(client_id: int) -> None:
         c.archived_at = utcnow()
         s.add(AuditLog(user_id=user.id, action="archive_client", entity_type="client", entity_id=c.id))
         s.commit()
+
+
+def restore_client(client_id: int) -> ClientRecord:
+    user = require_login()
+    with session_scope() as s:
+        c = s.get(Client, client_id)
+        if c is None:
+            raise ClientError("Client not found")
+        c.archived_at = None
+        s.add(AuditLog(user_id=user.id, action="restore_client", entity_type="client", entity_id=c.id))
+        s.commit()
+        return ClientRecord(c.id, c.display_name, c.reference, c.folder_path, c.created_at, c.archived_at)
+
+
+def delete_client(client_id: int) -> None:
+    """Admin-only. Removes the client row (statements/transactions cascade)."""
+    user = require_admin()
+    with session_scope() as s:
+        c = s.get(Client, client_id)
+        if c is None:
+            raise ClientError("Client not found")
+        display_name = c.display_name
+        s.delete(c)
+        s.add(AuditLog(
+            user_id=user.id,
+            action="delete_client",
+            entity_type="client",
+            entity_id=client_id,
+            detail_json=json.dumps({"display_name": display_name}),
+        ))
+        s.commit()
+
+
+def reassign_client(client_id: int, new_user_id: int) -> ClientRecord:
+    """Admin-only. Change the owning broker (``created_by``)."""
+    actor = require_admin()
+    with session_scope() as s:
+        c = s.get(Client, client_id)
+        if c is None:
+            raise ClientError("Client not found")
+        target = s.get(User, new_user_id)
+        if target is None or target.is_active == 0:
+            raise ClientError("Target user not found or inactive")
+        from_id = c.created_by
+        c.created_by = new_user_id
+        s.add(AuditLog(
+            user_id=actor.id,
+            action="reassign_client",
+            entity_type="client",
+            entity_id=c.id,
+            detail_json=json.dumps({"from": from_id, "to": new_user_id}),
+        ))
+        s.commit()
+        return ClientRecord(c.id, c.display_name, c.reference, c.folder_path, c.created_at, c.archived_at)

@@ -1,12 +1,16 @@
 """Settings view — AI model management + categorisation thresholds."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -20,10 +24,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..auth.session import get_current, set_current
+from ..categorize import corrections_cache
 from ..categorize.llm_client import LLMError, OllamaClient
 from ..config import get_settings
 from ..db import app_settings
+from ..users import service as users_service
 from ..utils.logging import logger
+from .widgets.avatar import AvatarLabel
 
 
 class _PullWorker(QObject):
@@ -123,6 +131,7 @@ class PullModelDialog(QDialog):
 class SettingsView(QWidget):
     back_requested = Signal()
     model_changed = Signal(str)  # emitted when user saves a new active model
+    profile_changed = Signal()   # emitted after avatar upload/clear
 
     def __init__(self) -> None:
         super().__init__()
@@ -138,11 +147,116 @@ class SettingsView(QWidget):
         header.addStretch(1)
         layout.addLayout(header)
 
+        layout.addWidget(self._build_profile_panel())
         layout.addWidget(self._build_ai_panel())
+        layout.addWidget(self._build_data_panel())
         layout.addWidget(self._build_thresholds_panel())
         layout.addStretch(1)
 
         self.refresh()
+
+    # ---- Profile panel ---------------------------------------------------
+
+    def _build_profile_panel(self) -> QGroupBox:
+        box = QGroupBox("Profile")
+        layout = QHBoxLayout(box)
+
+        self.avatar = AvatarLabel(size=84)
+        layout.addWidget(self.avatar)
+
+        meta = QVBoxLayout()
+        self.profile_name = QLabel("—")
+        self.profile_name.setStyleSheet("QLabel { font-weight: 600; font-size: 14px; }")
+        self.profile_meta = QLabel("—")
+        self.profile_meta.setStyleSheet("QLabel { color: #6B6679; }")
+        meta.addWidget(self.profile_name)
+        meta.addWidget(self.profile_meta)
+        meta.addStretch(1)
+        layout.addLayout(meta, 1)
+
+        buttons = QVBoxLayout()
+        change = QPushButton("Change photo…")
+        change.clicked.connect(self._change_photo)
+        remove = QPushButton("Remove photo")
+        remove.clicked.connect(self._remove_photo)
+        buttons.addWidget(change)
+        buttons.addWidget(remove)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        return box
+
+    def _change_photo(self) -> None:
+        cu = get_current()
+        if cu is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select profile photo", "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)"
+        )
+        if not path:
+            return
+        try:
+            stored = users_service.set_user_photo(cu.id, Path(path))
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Could not save photo", str(e))
+            return
+        self._refresh_current_user(photo_path=stored)
+        self._render_profile()
+        self.profile_changed.emit()
+
+    def _remove_photo(self) -> None:
+        cu = get_current()
+        if cu is None:
+            return
+        users_service.clear_user_photo(cu.id)
+        self._refresh_current_user(photo_path=None)
+        self._render_profile()
+        self.profile_changed.emit()
+
+    def _refresh_current_user(self, *, photo_path: str | None) -> None:
+        cu = get_current()
+        if cu is None:
+            return
+        from ..auth.session import CurrentUser
+        set_current(CurrentUser(
+            id=cu.id, username=cu.username, role=cu.role,
+            full_name=cu.full_name, photo_path=photo_path,
+        ))
+
+    def _render_profile(self) -> None:
+        cu = get_current()
+        if cu is None:
+            self.profile_name.setText("(not logged in)")
+            self.profile_meta.setText("")
+            self.avatar.set_photo(None, "", None)
+            return
+        self.profile_name.setText(cu.full_name or cu.username)
+        self.profile_meta.setText(f"{cu.username} · {cu.role}")
+        self.avatar.set_photo(cu.photo_path, cu.username, cu.full_name)
+
+    # ---- Data panel ------------------------------------------------------
+
+    def _build_data_panel(self) -> QGroupBox:
+        box = QGroupBox("Corrections cache")
+        layout = QVBoxLayout(box)
+        path = corrections_cache.cache_path()
+        label = QLabel(
+            "The AI checks this file before calling the model. Copy it between "
+            "installs to carry corrections with you.<br>"
+            f"<code>{path}</code>"
+        )
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        layout.addWidget(label)
+        row = QHBoxLayout()
+        open_btn = QPushButton("Open folder")
+        open_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+        )
+        row.addWidget(open_btn)
+        row.addStretch(1)
+        layout.addLayout(row)
+        return box
 
     # ---- AI panel --------------------------------------------------------
 
@@ -210,6 +324,7 @@ class SettingsView(QWidget):
         s = get_settings()
         saved_url = app_settings.get("ollama_url") or s.ollama_url
         self.url_input.setText(saved_url)
+        self._render_profile()
         self.refresh_models()
 
     def refresh_models(self) -> None:

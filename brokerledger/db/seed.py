@@ -117,6 +117,9 @@ def seed_bootstrap_rules(session: Session) -> int:
 
 
 def run_all_seeds() -> None:
+    from ..categorize import corrections_cache
+
     with session_scope() as s:
         seed_categories(s)
         seed_bootstrap_rules(s)
+        corrections_cache.sync_into_db(s)

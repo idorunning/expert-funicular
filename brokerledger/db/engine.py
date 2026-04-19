@@ -37,7 +37,16 @@ def init_engine(db_file: Path | None = None, echo: bool = False) -> Engine:
     _engine = create_engine(url, echo=echo, future=True)
     _SessionFactory = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
     Base.metadata.create_all(_engine)
+    _ensure_user_photo_column(_engine)
     return _engine
+
+
+def _ensure_user_photo_column(engine: Engine) -> None:
+    """Idempotent backfill: add users.photo_path when missing (pre-existing DBs)."""
+    with engine.begin() as c:
+        cols = {row[1] for row in c.exec_driver_sql("PRAGMA table_info(users)").fetchall()}
+        if "photo_path" not in cols:
+            c.exec_driver_sql("ALTER TABLE users ADD COLUMN photo_path TEXT")
 
 
 def get_engine() -> Engine:

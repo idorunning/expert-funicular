@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db.models import AuditLog, MerchantRule, Transaction, utcnow
+from . import corrections_cache
 from .prompts import FewShotExample
 from .taxonomy import group_of
 
@@ -86,6 +87,14 @@ def apply_correction(
             client_id=tx.client_id, created_by=user_id, delta_weight=+2)
     _decay_other_categories(session, merchant=merchant, winner=new_category,
                             scope="client", client_id=tx.client_id)
+    corrections_cache.append(
+        merchant=merchant,
+        category=new_category,
+        group=group_of(new_category),
+        scope="client",
+        client_id=tx.client_id,
+        weight=2,
+    )
 
     # 2. Promote to global if N distinct clients have confirmed the same mapping.
     distinct_clients = session.execute(
@@ -108,6 +117,14 @@ def apply_correction(
         )
         _decay_other_categories(session, merchant=merchant, winner=new_category,
                                 scope="global", client_id=None)
+        corrections_cache.append(
+            merchant=merchant,
+            category=new_category,
+            group=group_of(new_category),
+            scope="global",
+            client_id=None,
+            weight=1,
+        )
         promoted = upserted
 
     # 3. Update the transaction itself.

@@ -124,7 +124,13 @@ def login(username: str, password: str) -> CurrentUser:
             u.password_hash = hash_password(password)
         s.add(AuditLog(user_id=u.id, action="login", entity_type="user", entity_id=u.id))
         s.commit()
-        cu = CurrentUser(id=u.id, username=u.username, role=u.role, full_name=u.full_name)
+        cu = CurrentUser(
+            id=u.id,
+            username=u.username,
+            role=u.role,
+            full_name=u.full_name,
+            photo_path=u.photo_path,
+        )
     set_current(cu)
     return cu
 

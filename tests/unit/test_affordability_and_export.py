@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -37,6 +38,25 @@ def test_affordability_totals(logged_in_admin, tmp_path: Path):
     assert report.discretionary_total == Decimal("65.29")  # Tesco 54.30 + Netflix 10.99
     assert report.outgoings_total == Decimal("365.29")
     assert report.net_disposable == Decimal("6634.71")
+
+
+def test_affordability_date_window(logged_in_admin, tmp_path: Path):
+    client = create_client("Windowed Client")
+    result = ingest_statement(client.id, _write_csv(tmp_path))
+    categorize_statement(result.statement_id, llm=FakeLLMClient())
+
+    full = compute_for_client(client.id)
+    # Limit to April 2025 only (excludes everything in March).
+    windowed = compute_for_client(
+        client.id,
+        date_start=date(2025, 4, 1),
+        date_end=date(2025, 4, 30),
+    )
+    assert windowed.income_total == Decimal("3500.00")
+    assert windowed.committed_total == Decimal("0.00")
+    assert windowed.discretionary_total == Decimal("0.00")
+    assert windowed.income_total < full.income_total
+    assert windowed.committed_total < full.committed_total
 
 
 def test_xlsx_export_sheets(logged_in_admin, tmp_path: Path):

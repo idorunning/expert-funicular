@@ -43,6 +43,14 @@ def db_path() -> Path:
     return data_dir() / "app.db"
 
 
+def avatars_dir() -> Path:
+    return app_data_dir() / "avatars"
+
+
+def corrections_cache_path() -> Path:
+    return data_dir() / "corrections.json"
+
+
 def ensure_dirs() -> None:
-    for d in (app_data_dir(), data_dir(), clients_dir(), logs_dir(), backups_dir()):
+    for d in (app_data_dir(), data_dir(), clients_dir(), logs_dir(), backups_dir(), avatars_dir()):
         d.mkdir(parents=True, exist_ok=True)

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..auth.service import logout
+from ..auth.session import get_current
 from .admin_users_view import AdminUsersView
 from .client_detail_view import ClientDetailView
 from .clients_view import ClientsView
@@ -21,6 +22,7 @@ from .login_view import LoginView
 from .review_view import ReviewView
 from .settings_view import SettingsView
 from .theme import load_logo_pixmap
+from .widgets.avatar import AvatarLabel
 
 
 class _BrandHeader(QFrame):
@@ -50,6 +52,27 @@ class _BrandHeader(QFrame):
         text_col.addWidget(subtitle)
         row.addLayout(text_col)
         row.addStretch(1)
+
+        self.user_label = QLabel("")
+        self.user_label.setObjectName("BrandUserLabel")
+        self.user_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.user_label)
+
+        self.avatar = AvatarLabel(size=40)
+        self.avatar.setVisible(False)
+        row.addWidget(self.avatar)
+
+    def refresh_user(self) -> None:
+        from ..auth.session import get_current
+        cu = get_current()
+        if cu is None:
+            self.user_label.setText("")
+            self.avatar.setVisible(False)
+            return
+        name = cu.full_name or cu.username
+        self.user_label.setText(f"<span style='color:#FFFFFF'>{name}</span>")
+        self.avatar.set_photo(cu.photo_path, cu.username, cu.full_name)
+        self.avatar.setVisible(True)
 
 
 class MainWindow(QMainWindow):
@@ -88,6 +111,7 @@ class MainWindow(QMainWindow):
         self.clients.open_client.connect(self._open_client_detail)
         self.admin.back_requested.connect(self._show_clients)
         self.settings.back_requested.connect(self._show_clients)
+        self.settings.profile_changed.connect(self.header.refresh_user)
 
         # Cache detail views per client so their worker threads survive
         # navigation — destroying a view with a running QThread crashes Qt.
@@ -102,6 +126,7 @@ class MainWindow(QMainWindow):
         self.login.focus_default()
 
     def _on_logged_in(self) -> None:
+        self.header.refresh_user()
         self.clients.refresh()
         self.stack.setCurrentWidget(self.clients)
 
@@ -115,6 +140,7 @@ class MainWindow(QMainWindow):
             )
             return
         logout()
+        self.header.refresh_user()
         self.stack.setCurrentWidget(self.login)
         self.login.focus_default()
 

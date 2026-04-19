@@ -40,6 +40,7 @@ class User(Base):
     locked_until: Mapped[datetime | None] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column()
+    photo_path: Mapped[str | None] = mapped_column(String(500))
 
     __table_args__ = (CheckConstraint("role IN ('admin','broker')", name="ck_user_role"),)
 
