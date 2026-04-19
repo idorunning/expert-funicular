@@ -31,6 +31,7 @@ from .workers.recategorize_worker import run_recategorize_in_thread
 class ClientDetailView(QWidget):
     back_requested = Signal()
     review_requested = Signal()
+    processing_changed = Signal(bool)
 
     def __init__(self, client_id: int, client_name: str) -> None:
         super().__init__()
@@ -202,7 +203,6 @@ class ClientDetailView(QWidget):
         running = self._thread is not None or self._recategorize_thread is not None
         self.process_btn.setEnabled(has_queue and not running)
         self.clear_btn.setEnabled(has_queue and not running)
-        self.back_btn.setEnabled(not running)
         self.recategorize_btn.setEnabled(not running)
 
     def _clear_queue(self) -> None:
@@ -242,6 +242,7 @@ class ClientDetailView(QWidget):
         thread.finished.connect(self._on_thread_finished)
         thread.start()
         self._update_buttons()
+        self.processing_changed.emit(True)
 
     def _find_queue_item(self, name: str) -> QListWidgetItem | None:
         for key, item in self._queue_items.items():
@@ -326,6 +327,7 @@ class ClientDetailView(QWidget):
         self._thread = None
         self._worker = None
         self._update_buttons()
+        self.processing_changed.emit(self.is_processing())
 
     def is_processing(self) -> bool:
         return self._thread is not None or self._recategorize_thread is not None
@@ -348,6 +350,7 @@ class ClientDetailView(QWidget):
         thread.finished.connect(self._on_recategorize_thread_finished)
         thread.start()
         self._update_buttons()
+        self.processing_changed.emit(True)
 
     def _on_recategorize_done(self, count: int) -> None:
         self.progress.setRange(0, 1)
@@ -371,6 +374,7 @@ class ClientDetailView(QWidget):
         self._recategorize_thread = None
         self._recategorize_worker = None
         self._update_buttons()
+        self.processing_changed.emit(self.is_processing())
 
     def _export(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
