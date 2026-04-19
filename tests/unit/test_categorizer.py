@@ -3,7 +3,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from brokerledger.categorize.categorizer import categorize_statement
+from brokerledger.categorize.categorizer import categorize_statement, recategorize_client
 from brokerledger.categorize.llm_client import FakeLLMClient
 from brokerledger.categorize.memory import apply_correction
 from brokerledger.clients.service import create_client
@@ -125,3 +125,64 @@ def test_correction_creates_rule_and_classifies_future_rows(logged_in_admin, tmp
         ).scalars().all()
     assert len(global_rules) == 1
     assert global_rules[0].category == "Entertainment"
+
+
+def test_recategorize_client_skips_user_corrections(logged_in_admin, tmp_path: Path):
+    client = create_client("Recat Client")
+    csv_path = _write_demo_csv(tmp_path)
+    result = ingest_statement(client.id, csv_path)
+    categorize_statement(result.statement_id, llm=FakeLLMClient())
+
+    # User corrects the unknown merchant to an arbitrary category.
+    with session_scope() as s:
+        unk = s.execute(
+            select(Transaction).where(
+                Transaction.client_id == client.id,
+                Transaction.description_raw == "UNKNOWN MERCHANT XYZ",
+            )
+        ).scalar_one()
+        apply_correction(s, tx=unk, new_category="Entertainment", user_id=logged_in_admin.id)
+        s.commit()
+        unk_id = unk.id
+
+    # Count rows eligible for re-categorisation (i.e. source != 'user').
+    with session_scope() as s:
+        eligible = s.execute(
+            select(Transaction).where(
+                Transaction.client_id == client.id,
+                Transaction.source != "user",
+            )
+        ).scalars().all()
+        expected = len(eligible)
+
+    updated = recategorize_client(client.id, llm=FakeLLMClient())
+    assert updated == expected
+
+    # The user-corrected row must retain its category and source.
+    with session_scope() as s:
+        tx = s.get(Transaction, unk_id)
+    assert tx.source == "user"
+    assert tx.category == "Entertainment"
+    assert tx.needs_review == 0
+
+
+def test_recategorize_client_returns_zero_when_all_user_corrected(logged_in_admin, tmp_path: Path):
+    client = create_client("All Corrected Client")
+    csv_path = _write_demo_csv(tmp_path)
+    result = ingest_statement(client.id, csv_path)
+    categorize_statement(result.statement_id, llm=FakeLLMClient())
+
+    with session_scope() as s:
+        txs = s.execute(
+            select(Transaction).where(Transaction.client_id == client.id)
+        ).scalars().all()
+        for tx in txs:
+            apply_correction(s, tx=tx, new_category="Entertainment", user_id=logged_in_admin.id)
+        s.commit()
+
+    assert recategorize_client(client.id, llm=FakeLLMClient()) == 0
+
+
+def test_recategorize_client_returns_zero_for_no_transactions(logged_in_admin):
+    client = create_client("Empty Client")
+    assert recategorize_client(client.id, llm=FakeLLMClient()) == 0

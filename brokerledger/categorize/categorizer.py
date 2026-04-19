@@ -190,3 +190,60 @@ def recategorize_transaction(tx_id: int, *, llm: LLMClient | None = None) -> Dec
         tx.updated_at = utcnow()
         s.commit()
         return decision
+
+
+def recategorize_client(
+    client_id: int,
+    *,
+    llm: LLMClient | None = None,
+    progress_cb=None,
+) -> int:
+    """Re-run AI categorisation on all non-user transactions for a client.
+
+    Skips rows with source == 'user' so human corrections are never
+    overwritten. Returns the number of rows updated.
+    """
+    llm = llm or get_llm_client()
+    with session_scope() as s:
+        txs = s.execute(
+            select(Transaction).where(
+                Transaction.client_id == client_id,
+                Transaction.source != "user",
+            )
+        ).scalars().all()
+        total = len(txs)
+        if total == 0:
+            return 0
+        updated = 0
+        for idx, tx in enumerate(txs):
+            decision = _decide(
+                s,
+                merchant=tx.merchant_normalized,
+                description_raw=tx.description_raw,
+                amount=tx.amount,
+                direction=tx.direction,
+                posted_date=tx.posted_date,
+                client_id=tx.client_id,
+                llm=llm,
+            )
+            if tx.direction == "credit" and decision.group not in {GROUP_INCOME, GROUP_EXCLUDED}:
+                decision = Decision(
+                    category="Other income",
+                    group=GROUP_INCOME,
+                    confidence=max(decision.confidence, 0.6),
+                    source=decision.source,
+                    reason="credit defaulted to income; " + decision.reason,
+                    needs_review=True,
+                )
+            tx.category = decision.category
+            tx.category_group = decision.group
+            tx.confidence = decision.confidence
+            tx.source = decision.source
+            tx.reason = decision.reason
+            tx.needs_review = 1 if decision.needs_review else 0
+            tx.updated_at = utcnow()
+            updated += 1
+            if progress_cb is not None:
+                progress_cb(idx + 1, total)
+        s.commit()
+    return updated

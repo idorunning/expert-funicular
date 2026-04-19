@@ -25,6 +25,7 @@ from ..affordability.calculator import compute_for_client
 from ..export.xlsx import export_client_workbook
 from .widgets.dropzone import DropZone
 from .workers.ingest_worker import run_ingest_in_thread
+from .workers.recategorize_worker import run_recategorize_in_thread
 
 
 class ClientDetailView(QWidget):
@@ -37,6 +38,8 @@ class ClientDetailView(QWidget):
         self.client_name = client_name
         self._thread: QThread | None = None
         self._worker = None
+        self._recategorize_thread: QThread | None = None
+        self._recategorize_worker = None
         self._pending_paths: list[Path] = []
 
         layout = QVBoxLayout(self)
@@ -120,9 +123,16 @@ class ClientDetailView(QWidget):
         outer.addLayout(grid)
 
         buttons = QHBoxLayout()
-        refresh = QPushButton("Refresh")
-        refresh.clicked.connect(self.refresh)
-        buttons.addWidget(refresh)
+        recalculate_btn = QPushButton("Recalculate")
+        recalculate_btn.setToolTip("Recalculate affordability from current transaction categories")
+        recalculate_btn.clicked.connect(self.refresh)
+        buttons.addWidget(recalculate_btn)
+        self.recategorize_btn = QPushButton("Re-categorise transactions")
+        self.recategorize_btn.setToolTip(
+            "Re-run AI categorisation on all transactions (skips human corrections)"
+        )
+        self.recategorize_btn.clicked.connect(self._start_recategorize)
+        buttons.addWidget(self.recategorize_btn)
         buttons.addStretch(1)
         export_btn = QPushButton("Export XLSX…")
         export_btn.clicked.connect(self._export)
@@ -185,10 +195,11 @@ class ClientDetailView(QWidget):
 
     def _update_buttons(self) -> None:
         has_queue = bool(self._pending_paths)
-        running = self._thread is not None
+        running = self._thread is not None or self._recategorize_thread is not None
         self.process_btn.setEnabled(has_queue and not running)
         self.clear_btn.setEnabled(has_queue and not running)
         self.back_btn.setEnabled(not running)
+        self.recategorize_btn.setEnabled(not running)
 
     def _clear_queue(self) -> None:
         if self._thread is not None:
@@ -203,7 +214,7 @@ class ClientDetailView(QWidget):
         self._update_buttons()
 
     def _process_queue(self) -> None:
-        if self._thread is not None or not self._pending_paths:
+        if self._thread is not None or self._recategorize_thread is not None or not self._pending_paths:
             return
         paths = list(self._pending_paths)
         self.progress.setVisible(True)
@@ -291,7 +302,44 @@ class ClientDetailView(QWidget):
         self._update_buttons()
 
     def is_processing(self) -> bool:
-        return self._thread is not None
+        return self._thread is not None or self._recategorize_thread is not None
+
+    def _start_recategorize(self) -> None:
+        if self._thread is not None or self._recategorize_thread is not None:
+            return
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)
+        self.progress_label.setVisible(True)
+        self.progress_label.setText("Starting re-categorisation…")
+
+        thread, worker = run_recategorize_in_thread(self.client_id)
+        self._recategorize_thread = thread
+        self._recategorize_worker = worker
+        worker.progress.connect(self._on_progress)
+        worker.done.connect(self._on_recategorize_done)
+        worker.error.connect(self._on_recategorize_error)
+        thread.finished.connect(self._on_recategorize_thread_finished)
+        thread.start()
+        self._update_buttons()
+
+    def _on_recategorize_done(self, count: int) -> None:
+        msg = (
+            f"Re-categorised {count} transaction(s)."
+            if count
+            else "No transactions needed re-categorisation."
+        )
+        self.progress_label.setText(msg)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(1)
+        self.refresh()
+
+    def _on_recategorize_error(self, message: str) -> None:
+        QMessageBox.critical(self, "Re-categorisation failed", message)
+
+    def _on_recategorize_thread_finished(self) -> None:
+        self._recategorize_thread = None
+        self._recategorize_worker = None
+        self._update_buttons()
 
     def _export(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
