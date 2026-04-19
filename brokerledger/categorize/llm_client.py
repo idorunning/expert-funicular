@@ -46,13 +46,22 @@ def _assert_local(url: str) -> None:
         raise LLMError(f"Refusing non-local LLM endpoint: {url!r}")
 
 
+def _saved_model_preference() -> str:
+    try:
+        from ..db import app_settings
+        return app_settings.get("ollama_model") or ""
+    except Exception:  # noqa: BLE001 — fall through to auto-detect if DB not ready
+        return ""
+
+
 class OllamaClient(LLMClient):
     def __init__(self, base_url: str | None = None, model: str | None = None,
                  timeout: float | None = None) -> None:
         s = get_settings()
         self.base_url = (base_url or s.ollama_url).rstrip("/")
         _assert_local(self.base_url)
-        self.model = model or s.ollama_model
+        # Precedence: explicit arg → env var → DB setting → auto-detect.
+        self.model = model or s.ollama_model or _saved_model_preference()
         self.timeout = timeout if timeout is not None else s.ollama_timeout_seconds
         if not self.model:
             self.model = self._auto_pick_model(s.model_priority)

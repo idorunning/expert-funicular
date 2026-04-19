@@ -46,6 +46,7 @@ class ClientsView(QWidget):
     open_client = Signal(int, str)   # (client_id, name)
     logout_requested = Signal()
     admin_requested = Signal()
+    settings_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -58,6 +59,9 @@ class ClientsView(QWidget):
         header.addStretch(1)
         self.user_label = QLabel()
         header.addWidget(self.user_label)
+        self.settings_btn = QPushButton("Settings…")
+        self.settings_btn.clicked.connect(self.settings_requested.emit)
+        header.addWidget(self.settings_btn)
         self.admin_btn = QPushButton("Admin…")
         self.admin_btn.clicked.connect(self.admin_requested.emit)
         header.addWidget(self.admin_btn)

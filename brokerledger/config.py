@@ -12,8 +12,10 @@ class Settings(BaseSettings):
     ollama_model: str = ""  # empty = auto-detect at first run
     ollama_timeout_seconds: float = 120.0
 
-    # Model auto-detect priority.
+    # Model auto-detect priority. Gemma 4 first, fall back to Gemma 3, then Llama.
     model_priority: tuple[str, ...] = (
+        "gemma4:e4b",
+        "gemma4:4b",
         "gemma3:4b",
         "gemma3n:e4b",
         "llama3.2:3b-instruct",

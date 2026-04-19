@@ -10,6 +10,7 @@ from .client_detail_view import ClientDetailView
 from .clients_view import ClientsView
 from .login_view import LoginView
 from .review_view import ReviewView
+from .settings_view import SettingsView
 
 
 class MainWindow(QMainWindow):
@@ -24,16 +25,20 @@ class MainWindow(QMainWindow):
         self.login = LoginView()
         self.clients = ClientsView()
         self.admin = AdminUsersView()
+        self.settings = SettingsView()
 
-        self.stack.addWidget(self.login)   # 0
-        self.stack.addWidget(self.clients) # 1
-        self.stack.addWidget(self.admin)   # 2
+        self.stack.addWidget(self.login)    # 0
+        self.stack.addWidget(self.clients)  # 1
+        self.stack.addWidget(self.admin)    # 2
+        self.stack.addWidget(self.settings) # 3
 
         self.login.logged_in.connect(self._on_logged_in)
         self.clients.logout_requested.connect(self._on_logout)
         self.clients.admin_requested.connect(self._open_admin)
+        self.clients.settings_requested.connect(self._open_settings)
         self.clients.open_client.connect(self._open_client_detail)
         self.admin.back_requested.connect(self._show_clients)
+        self.settings.back_requested.connect(self._show_clients)
 
         # Transient detail/review views created on demand.
         self._detail: ClientDetailView | None = None
@@ -54,6 +59,10 @@ class MainWindow(QMainWindow):
     def _open_admin(self) -> None:
         self.admin.refresh()
         self.stack.setCurrentWidget(self.admin)
+
+    def _open_settings(self) -> None:
+        self.settings.refresh()
+        self.stack.setCurrentWidget(self.settings)
 
     def _show_clients(self) -> None:
         self.clients.refresh()
