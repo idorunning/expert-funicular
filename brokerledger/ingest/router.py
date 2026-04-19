@@ -54,14 +54,36 @@ def _detect_kind(path: Path) -> str:
     raise IngestError(f"Unsupported file type: {path.suffix}")
 
 
+def _is_valid_pdf(path: Path) -> bool:
+    try:
+        with path.open("rb") as f:
+            return f.read(5) == b"%PDF-"
+    except OSError:
+        return False
+
+
 def _parse(path: Path, kind: str) -> tuple[list[RawTransaction], str, int | None]:
     if kind == "csv":
         return parse_csv(path), "csv", None
     if kind == "xlsx":
         return parse_xlsx(path), "xlsx", None
     if kind == "pdf":
+        if not _is_valid_pdf(path):
+            raise IngestError(
+                f"{path.name} does not look like a valid PDF (missing %PDF- header). "
+                "It may be corrupted, an HTML page saved with a .pdf extension, or a "
+                "different format. Try re-downloading from your bank, or use the "
+                "CSV/XLSX export if available."
+            )
         # First try text extraction; OCR fallback only if sparse.
-        lines, page_count = extract_lines(path)
+        try:
+            lines, page_count = extract_lines(path)
+        except Exception as e:  # noqa: BLE001
+            raise IngestError(
+                f"{path.name} could not be read as a PDF: {e}. "
+                "The file may be corrupted, password-protected, or truncated. "
+                "Try opening it in a PDF viewer first; if that fails, re-download it."
+            ) from e
         avg = average_chars_per_page(lines, page_count)
         if avg >= _PDF_OCR_THRESHOLD:
             txs, _, _ = parse_pdf_text(path)
