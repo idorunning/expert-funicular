@@ -77,10 +77,14 @@ class ClientDetailView(QWidget):
 
         self.progress = QProgressBar()
         self.progress.setVisible(False)
+        self.progress.setMinimumHeight(22)
+        self.progress.setFormat("  %p%")
+        self.progress.setTextVisible(True)
         layout.addWidget(self.progress)
 
         self.progress_label = QLabel("")
         self.progress_label.setVisible(False)
+        self.progress_label.setWordWrap(True)
         layout.addWidget(self.progress_label)
 
         self.file_log = QListWidget()
@@ -218,10 +222,11 @@ class ClientDetailView(QWidget):
             return
         paths = list(self._pending_paths)
         self.progress.setVisible(True)
-        self.progress.setRange(0, len(paths))
+        self.progress.setRange(0, len(paths) * 100)
         self.progress.setValue(0)
+        self._set_progress_running()
         self.progress_label.setVisible(True)
-        self.progress_label.setText(f"Processing {len(paths)} file(s)…")
+        self.progress_label.setText(f"Starting — {len(paths)} file(s) queued…")
 
         thread, worker = run_ingest_in_thread(self.client_id, paths)
         self._thread = thread
@@ -244,10 +249,19 @@ class ClientDetailView(QWidget):
                 return item
         return None
 
+    def _set_progress_running(self) -> None:
+        self.progress.setStyleSheet("")  # default blue/system style
+
+    def _set_progress_done(self) -> None:
+        self.progress.setStyleSheet(
+            "QProgressBar::chunk { background-color: #3a9e52; }"
+        )
+
     def _on_progress(self, done: int, total: int, message: str) -> None:
         self.progress.setRange(0, total)
         self.progress.setValue(done)
         self.progress_label.setText(message)
+        self.progress_label.setVisible(True)
 
     def _on_file_done(self, result) -> None:
         # Look up the queue item by original filename via the stored path.
@@ -286,7 +300,19 @@ class ClientDetailView(QWidget):
             self.file_log.addItem(text)
 
     def _on_all_done(self, ok: int, fail: int) -> None:
-        self.progress_label.setText(f"Done — {ok} file(s) processed, {fail} failed")
+        self.progress.setRange(0, 1)
+        self.progress.setValue(1)
+        self._set_progress_done()
+        if fail:
+            self.progress_label.setText(
+                f"<span style='color:#a52d1e;font-weight:bold'>⚠ Finished with errors</span>"
+                f" — {ok} file(s) imported, {fail} failed"
+            )
+        else:
+            self.progress_label.setText(
+                f"<span style='color:#176b1a;font-weight:bold'>✓ Import complete</span>"
+                f" — {ok} file(s) imported"
+            )
         # Do NOT clear self._thread / self._worker here — the QThread event
         # loop is still running. Wait for thread.finished (see _on_thread_finished).
         self._pending_paths.clear()
@@ -308,7 +334,8 @@ class ClientDetailView(QWidget):
         if self._thread is not None or self._recategorize_thread is not None:
             return
         self.progress.setVisible(True)
-        self.progress.setRange(0, 0)
+        self.progress.setRange(0, 0)   # indeterminate pulse until first progress signal
+        self._set_progress_running()
         self.progress_label.setVisible(True)
         self.progress_label.setText("Starting re-categorisation…")
 
@@ -323,14 +350,18 @@ class ClientDetailView(QWidget):
         self._update_buttons()
 
     def _on_recategorize_done(self, count: int) -> None:
-        msg = (
-            f"Re-categorised {count} transaction(s)."
-            if count
-            else "No transactions needed re-categorisation."
-        )
-        self.progress_label.setText(msg)
         self.progress.setRange(0, 1)
         self.progress.setValue(1)
+        self._set_progress_done()
+        if count:
+            self.progress_label.setText(
+                f"<span style='color:#176b1a;font-weight:bold'>✓ Re-categorisation complete</span>"
+                f" — {count} transaction(s) updated"
+            )
+        else:
+            self.progress_label.setText(
+                "<span style='color:#555'>No transactions needed re-categorisation.</span>"
+            )
         self.refresh()
 
     def _on_recategorize_error(self, message: str) -> None:

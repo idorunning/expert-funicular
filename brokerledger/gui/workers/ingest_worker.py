@@ -30,12 +30,21 @@ class IngestWorker(QObject):
         ok = 0
         fail = 0
         for idx, p in enumerate(self.paths):
-            self.progress.emit(idx, total, f"Parsing {p.name}")
+            self.progress.emit(idx * 100, total * 100, f"Parsing {p.name}…  (file {idx + 1} of {total})")
             try:
                 result: IngestResult = ingest_statement(self.client_id, p)
                 if not result.duplicate:
-                    self.progress.emit(idx, total, f"Categorising {p.name}")
-                    categorize_statement(result.statement_id)
+                    # Emit sub-file progress during categorisation so the bar
+                    # advances smoothly rather than freezing on each file.
+                    def _tx_cb(tx_done: int, tx_total: int, _idx: int = idx, _total: int = total, _name: str = p.name) -> None:
+                        pct = int(tx_done / tx_total * 100) if tx_total else 100
+                        bar_val = _idx * 100 + pct
+                        self.progress.emit(
+                            bar_val,
+                            _total * 100,
+                            f"Categorising {_name}…  {tx_done}/{tx_total} transactions  ({pct}%)"
+                        )
+                    categorize_statement(result.statement_id, progress_cb=_tx_cb)
                 self.file_done.emit(result)
                 ok += 1
             except IngestError as e:
@@ -46,7 +55,7 @@ class IngestWorker(QObject):
                 logger.exception("Unexpected ingest error for {}", p)
                 self.error.emit(p.name, f"Unexpected error: {e}")
                 fail += 1
-        self.progress.emit(total, total, "Done")
+        self.progress.emit(total * 100, total * 100, "Done")
         self.all_done.emit(ok, fail)
 
 
