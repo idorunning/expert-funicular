@@ -33,9 +33,35 @@ COLUMNS = [
     ("Amount (GBP)", 100),
     ("Category", 200),
     ("Group", 110),
-    ("Confidence", 90),
+    ("Confidence", 110),
     ("Needs review", 90),
 ]
+
+
+def confidence_tier(confidence: float | None, source: str | None) -> str:
+    if confidence is None:
+        return "—"
+    if source in ("rule", "user") and confidence >= 0.99:
+        return "Confirmed"
+    if confidence >= 0.85:
+        return "High"
+    if confidence >= 0.70:
+        return "Medium"
+    return "Low"
+
+
+_TIER_BG = {
+    "Confirmed": QColor(210, 240, 215),   # green
+    "High":      QColor(225, 245, 220),   # pale green
+    "Medium":    QColor(255, 244, 214),   # amber
+    "Low":       QColor(250, 220, 210),   # red/pink
+}
+_TIER_FG = {
+    "Confirmed": QColor(20, 95, 40),
+    "High":      QColor(50, 110, 55),
+    "Medium":    QColor(150, 100, 10),
+    "Low":       QColor(165, 45, 30),
+}
 
 
 class TransactionsModel(QAbstractTableModel):
@@ -64,6 +90,7 @@ class TransactionsModel(QAbstractTableModel):
                     "category": r.category or "",
                     "group": r.category_group or "",
                     "confidence": r.confidence,
+                    "source": r.source,
                     "needs_review": bool(r.needs_review),
                     "direction": r.direction,
                 }
@@ -105,21 +132,36 @@ class TransactionsModel(QAbstractTableModel):
             if col == 5:
                 return row["group"]
             if col == 6:
-                c = row["confidence"]
-                return "" if c is None else f"{c:.2f}"
+                return confidence_tier(row["confidence"], row["source"])
             if col == 7:
                 return "!" if row["needs_review"] else ""
         if role == Qt.ItemDataRole.BackgroundRole:
+            if col == 6:
+                tier = confidence_tier(row["confidence"], row["source"])
+                if tier in _TIER_BG:
+                    return QBrush(_TIER_BG[tier])
             if row["needs_review"]:
                 return QBrush(QColor(255, 246, 225))
-        if role == Qt.ItemDataRole.FontRole and col == 7 and row["needs_review"]:
-            f = QFont()
-            f.setBold(True)
-            return f
+        if role == Qt.ItemDataRole.ForegroundRole and col == 6:
+            tier = confidence_tier(row["confidence"], row["source"])
+            if tier in _TIER_FG:
+                return QBrush(_TIER_FG[tier])
+        if role == Qt.ItemDataRole.FontRole and col in (6, 7):
+            tier = confidence_tier(row["confidence"], row["source"])
+            if col == 6 and tier in _TIER_BG:
+                f = QFont()
+                f.setBold(True)
+                return f
+            if col == 7 and row["needs_review"]:
+                f = QFont()
+                f.setBold(True)
+                return f
         if role == Qt.ItemDataRole.ForegroundRole and col == 7 and row["needs_review"]:
             return QBrush(QColor(180, 90, 0))
         if role == Qt.ItemDataRole.TextAlignmentRole and col == 3:
             return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        if role == Qt.ItemDataRole.TextAlignmentRole and col == 6:
+            return Qt.AlignmentFlag.AlignCenter
         return None
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
@@ -146,6 +188,7 @@ class TransactionsModel(QAbstractTableModel):
         row["group"] = group_of(new_category)
         row["needs_review"] = False
         row["confidence"] = 1.0
+        row["source"] = "user"
         top_left = self.index(index.row(), 0)
         bottom_right = self.index(index.row(), self.columnCount() - 1)
         self.dataChanged.emit(top_left, bottom_right, [Qt.ItemDataRole.DisplayRole])
@@ -217,7 +260,14 @@ class ReviewView(QWidget):
                 select(Transaction).where(Transaction.client_id == self.client_id)
             ).scalars().all()
         flagged = sum(1 for t in total if t.needs_review)
+        tiers = {"Confirmed": 0, "High": 0, "Medium": 0, "Low": 0, "—": 0}
+        for t in total:
+            tiers[confidence_tier(t.confidence, t.source)] += 1
         self.summary.setText(
             f"<span style='color:#555'>{len(total)} transactions &middot; "
-            f"<b style='color:#b4580a'>{flagged} flagged for review</b></span>"
+            f"<span style='color:#145f28'><b>{tiers['Confirmed']}</b> confirmed</span> &middot; "
+            f"<span style='color:#326e37'><b>{tiers['High']}</b> high</span> &middot; "
+            f"<span style='color:#96640a'><b>{tiers['Medium']}</b> medium</span> &middot; "
+            f"<span style='color:#a52d1e'><b>{tiers['Low']}</b> low</span> &middot; "
+            f"<b style='color:#b4580a'>{flagged} flagged</b></span>"
         )

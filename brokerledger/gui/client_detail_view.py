@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -50,13 +51,21 @@ class ClientDetailView(QWidget):
         layout.addLayout(header)
 
         self.dropzone = DropZone()
-        self.dropzone.files_dropped.connect(self._on_files_dropped)
+        self.dropzone.files_dropped.connect(self._on_files_queued)
         layout.addWidget(self.dropzone)
 
         actions = QHBoxLayout()
         browse = QPushButton("Browse files…")
         browse.clicked.connect(self._browse)
         actions.addWidget(browse)
+        self.clear_btn = QPushButton("Clear queue")
+        self.clear_btn.clicked.connect(self._clear_queue)
+        self.clear_btn.setEnabled(False)
+        actions.addWidget(self.clear_btn)
+        self.process_btn = QPushButton("Process queued files")
+        self.process_btn.clicked.connect(self._process_queue)
+        self.process_btn.setEnabled(False)
+        actions.addWidget(self.process_btn)
         actions.addStretch(1)
         review = QPushButton("Review transactions →")
         review.clicked.connect(self.review_requested.emit)
@@ -72,8 +81,9 @@ class ClientDetailView(QWidget):
         layout.addWidget(self.progress_label)
 
         self.file_log = QListWidget()
-        self.file_log.setMaximumHeight(140)
+        self.file_log.setMaximumHeight(180)
         layout.addWidget(self.file_log)
+        self._queue_items: dict[str, QListWidgetItem] = {}
 
         layout.addWidget(self._build_affordability_panel())
 
@@ -92,7 +102,6 @@ class ClientDetailView(QWidget):
 
         grid = QFormLayout()
         self.l_period = QLabel("—")
-        self.l_months = QLabel("—")
         self.l_income = QLabel("—")
         self.l_committed = QLabel("—")
         self.l_discretionary = QLabel("—")
@@ -101,7 +110,6 @@ class ClientDetailView(QWidget):
         self.l_monthly_income = QLabel("—")
         self.l_monthly_net = QLabel("—")
         grid.addRow("Period", self.l_period)
-        grid.addRow("Months in window", self.l_months)
         grid.addRow("Income (total)", self.l_income)
         grid.addRow("Committed (total)", self.l_committed)
         grid.addRow("Discretionary (total)", self.l_discretionary)
@@ -130,7 +138,6 @@ class ClientDetailView(QWidget):
             self.l_period.setText(f"{report.period_start.isoformat()} → {report.period_end.isoformat()}")
         else:
             self.l_period.setText("—")
-        self.l_months.setText(f"{report.months_in_window:.2f}")
         self.l_income.setText(f"£{report.income_total:,.2f}")
         self.l_committed.setText(f"£{report.committed_total:,.2f}")
         self.l_discretionary.setText(f"£{report.discretionary_total:,.2f}")
@@ -153,21 +160,58 @@ class ClientDetailView(QWidget):
             self, "Select statements", "", "Statements (*.pdf *.csv *.xlsx);;All files (*)"
         )
         if files:
-            self._on_files_dropped([Path(f) for f in files])
+            self._on_files_queued([Path(f) for f in files])
 
-    def _on_files_dropped(self, paths: list[Path]) -> None:
+    def _on_files_queued(self, paths: list[Path]) -> None:
         if self._thread is not None:
-            QMessageBox.information(self, "Busy", "Ingest in progress — please wait.")
+            QMessageBox.information(self, "Busy", "Processing in progress — please wait.")
             return
-        self._pending_paths = list(paths)
+        added = 0
+        for p in paths:
+            key = str(p.resolve())
+            if key in self._queue_items:
+                continue
+            self._pending_paths.append(p)
+            item = QListWidgetItem(f"⏳ Queued: {p.name}")
+            self.file_log.addItem(item)
+            self._queue_items[key] = item
+            added += 1
+        if added:
+            self.progress_label.setVisible(True)
+            self.progress_label.setText(
+                f"{len(self._pending_paths)} file(s) queued. Click 'Process queued files' to start."
+            )
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        has_queue = bool(self._pending_paths)
+        running = self._thread is not None
+        self.process_btn.setEnabled(has_queue and not running)
+        self.clear_btn.setEnabled(has_queue and not running)
+
+    def _clear_queue(self) -> None:
+        if self._thread is not None:
+            return
+        for item in self._queue_items.values():
+            row = self.file_log.row(item)
+            if row >= 0:
+                self.file_log.takeItem(row)
+        self._queue_items.clear()
+        self._pending_paths.clear()
+        self.progress_label.setText("Queue cleared.")
+        self._update_buttons()
+
+    def _process_queue(self) -> None:
+        if self._thread is not None or not self._pending_paths:
+            return
+        paths = list(self._pending_paths)
         self.progress.setVisible(True)
         self.progress.setRange(0, len(paths))
         self.progress.setValue(0)
         self.progress_label.setVisible(True)
         self.progress_label.setText(f"Processing {len(paths)} file(s)…")
-        self.file_log.clear()
 
-        thread, worker = run_ingest_in_thread(self.client_id, self._pending_paths)
+        thread, worker = run_ingest_in_thread(self.client_id, paths)
         self._thread = thread
         self._worker = worker
         worker.progress.connect(self._on_progress)
@@ -175,6 +219,13 @@ class ClientDetailView(QWidget):
         worker.error.connect(self._on_file_error)
         worker.all_done.connect(self._on_all_done)
         thread.start()
+        self._update_buttons()
+
+    def _find_queue_item(self, name: str) -> QListWidgetItem | None:
+        for key, item in self._queue_items.items():
+            if Path(key).name == name:
+                return item
+        return None
 
     def _on_progress(self, done: int, total: int, message: str) -> None:
         self.progress.setRange(0, total)
@@ -182,18 +233,48 @@ class ClientDetailView(QWidget):
         self.progress_label.setText(message)
 
     def _on_file_done(self, result) -> None:
-        if result.duplicate:
-            self.file_log.addItem(f"⚠ Already imported — skipped (statement {result.statement_id})")
+        # Look up the queue item by original filename via the stored path.
+        # Use the worker's emitted message to update the right row; fallback
+        # appends a new row so the user never loses status for a file.
+        item = None
+        # Try to find an in-flight queued item in order (first pending).
+        for key, queued in list(self._queue_items.items()):
+            if queued.text().startswith("⏳") or queued.text().startswith("…"):
+                item = queued
+                name = Path(key).name
+                break
         else:
-            self.file_log.addItem(f"✓ {result.file_kind}: {result.transaction_count} rows (statement {result.statement_id})")
+            name = "(unknown)"
+        text = (
+            f"⚠ {name}: already imported — skipped (statement {result.statement_id})"
+            if result.duplicate
+            else f"✓ {name}: {result.file_kind} · {result.transaction_count} rows (statement {result.statement_id})"
+        )
+        if item is not None:
+            item.setText(text)
+            self._queue_items = {k: v for k, v in self._queue_items.items() if v is not item}
+        else:
+            self.file_log.addItem(text)
 
     def _on_file_error(self, name: str, message: str) -> None:
-        self.file_log.addItem(f"✗ {name}: {message}")
+        item = self._find_queue_item(name)
+        text = f"✗ {name}: {message}"
+        if item is not None:
+            item.setText(text)
+            for k, v in list(self._queue_items.items()):
+                if v is item:
+                    del self._queue_items[k]
+                    break
+        else:
+            self.file_log.addItem(text)
 
     def _on_all_done(self, ok: int, fail: int) -> None:
         self.progress_label.setText(f"Done — {ok} file(s) processed, {fail} failed")
         self._thread = None
         self._worker = None
+        self._pending_paths.clear()
+        self._queue_items.clear()
+        self._update_buttons()
         self.refresh()
 
     def _export(self) -> None:
