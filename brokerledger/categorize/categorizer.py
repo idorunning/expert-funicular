@@ -86,12 +86,24 @@ def _decide(
             last_err = e
             logger.warning("LLM attempt {} failed: {}", attempt + 1, e)
     else:
+        # All LLM attempts failed — use keyword-based fallback so every
+        # transaction still gets a useful category instead of Transfer/Excluded.
+        logger.warning("LLM unavailable for '{}'; applying keyword fallback", merchant)
+        from .llm_client import FakeLLMClient
+        kw = FakeLLMClient().classify(
+            description_raw=description_raw,
+            merchant_normalized=merchant,
+            amount=amount,
+            direction=direction,
+            posted_date=posted_date,
+            few_shot=few_shot,
+        )
         return Decision(
-            category="Transfer/Excluded",
-            group=GROUP_EXCLUDED,
-            confidence=0.0,
+            category=kw.category,
+            group=kw.group,
+            confidence=min(kw.confidence, 0.35),
             source="llm",
-            reason=f"LLM failure: {last_err}",
+            reason=f"keyword fallback (AI unavailable: {last_err})",
             needs_review=True,
         )
 

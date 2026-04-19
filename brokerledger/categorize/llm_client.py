@@ -133,8 +133,14 @@ def _parse_llm_json(text: str) -> LLMResult:
         obj = json.loads(text[start : end + 1])
 
     cat = str(obj.get("category", "")).strip()
-    if cat not in category_names():
-        raise LLMError(f"LLM returned invalid category: {cat!r}")
+    valid = category_names()
+    if cat not in valid:
+        # Accept case-insensitive match (models sometimes return "food" / "FOOD").
+        cat_lo = cat.lower()
+        matched = next((v for v in valid if v.lower() == cat_lo), None)
+        if matched is None:
+            raise LLMError(f"LLM returned invalid category: {cat!r}")
+        cat = matched
     grp = str(obj.get("group", "")).strip()
     expected_group = group_of(cat)
     if grp != expected_group:
@@ -214,7 +220,11 @@ def get_llm_client() -> LLMClient:
         logger.info("FAKE LLM mode enabled")
         return FakeLLMClient()
     try:
-        return OllamaClient()
+        client = OllamaClient()
+        # Probe connectivity once — if Ollama isn't running we find out now
+        # rather than after burning retries on every transaction.
+        client.list_models()
+        return client
     except LLMError as e:
-        logger.warning("Falling back to FakeLLMClient: {}", e)
+        logger.warning("Ollama not reachable — using keyword fallback for categorisation: {}", e)
         return FakeLLMClient()
