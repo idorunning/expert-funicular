@@ -102,6 +102,8 @@ class PullModelDialog(QDialog):
         worker.done.connect(thread.quit)
         worker.done.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        # Drop our refs only after the thread's event loop has fully exited.
+        thread.finished.connect(self._on_thread_finished)
         self._thread = thread
         self._worker = worker
         thread.start()
@@ -112,6 +114,8 @@ class PullModelDialog(QDialog):
     def _on_done(self, ok: bool, message: str) -> None:
         self.log.append(("✓ " if ok else "✗ ") + message)
         self.pull_btn.setEnabled(True)
+
+    def _on_thread_finished(self) -> None:
         self._thread = None
         self._worker = None
 

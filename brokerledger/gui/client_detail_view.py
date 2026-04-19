@@ -42,9 +42,9 @@ class ClientDetailView(QWidget):
         layout = QVBoxLayout(self)
 
         header = QHBoxLayout()
-        back = QPushButton("← Clients")
-        back.clicked.connect(self.back_requested.emit)
-        header.addWidget(back)
+        self.back_btn = QPushButton("← Clients")
+        self.back_btn.clicked.connect(self.back_requested.emit)
+        header.addWidget(self.back_btn)
         header.addStretch(1)
         header.addWidget(QLabel(f"<h1>{client_name}</h1>"))
         header.addStretch(1)
@@ -188,6 +188,7 @@ class ClientDetailView(QWidget):
         running = self._thread is not None
         self.process_btn.setEnabled(has_queue and not running)
         self.clear_btn.setEnabled(has_queue and not running)
+        self.back_btn.setEnabled(not running)
 
     def _clear_queue(self) -> None:
         if self._thread is not None:
@@ -218,6 +219,11 @@ class ClientDetailView(QWidget):
         worker.file_done.connect(self._on_file_done)
         worker.error.connect(self._on_file_error)
         worker.all_done.connect(self._on_all_done)
+        # CRITICAL: keep the Python references alive until thread.finished
+        # actually fires (the event loop has fully exited). Otherwise GC may
+        # destroy the QThread wrapper while Qt is still cleaning up, producing
+        # "QThread: Destroyed while thread is still running" warnings — or worse.
+        thread.finished.connect(self._on_thread_finished)
         thread.start()
         self._update_buttons()
 
@@ -270,12 +276,22 @@ class ClientDetailView(QWidget):
 
     def _on_all_done(self, ok: int, fail: int) -> None:
         self.progress_label.setText(f"Done — {ok} file(s) processed, {fail} failed")
-        self._thread = None
-        self._worker = None
+        # Do NOT clear self._thread / self._worker here — the QThread event
+        # loop is still running. Wait for thread.finished (see _on_thread_finished).
         self._pending_paths.clear()
         self._queue_items.clear()
         self._update_buttons()
         self.refresh()
+
+    def _on_thread_finished(self) -> None:
+        # Fires after the QThread's event loop has fully exited. Safe to drop
+        # our Python references now — Qt has finished cleaning up.
+        self._thread = None
+        self._worker = None
+        self._update_buttons()
+
+    def is_processing(self) -> bool:
+        return self._thread is not None
 
     def _export(self) -> None:
         path, _ = QFileDialog.getSaveFileName(

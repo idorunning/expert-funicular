@@ -1,6 +1,7 @@
 """Statement-file router: dispatch by extension, parse, persist statement + rows."""
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -184,10 +185,12 @@ def ingest_statement(client_id: int, source_path: Path) -> IngestResult:
                 action="import_statement",
                 entity_type="statement",
                 entity_id=stmt.id,
-                detail_json=(
-                    f'{{"client_id":{client_id},"rows":{len(raw_txs)},'
-                    f'"kind":"{detected_kind}","sha256":"{file_hash}"}}'
-                ),
+                detail_json=json.dumps({
+                    "client_id": client_id,
+                    "rows": len(raw_txs),
+                    "kind": detected_kind,
+                    "sha256": file_hash,
+                }),
             )
         )
         s.commit()

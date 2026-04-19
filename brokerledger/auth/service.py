@@ -1,6 +1,7 @@
 """Authentication service: create_user, login, change_password."""
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 
 from sqlalchemy import func, select
@@ -64,7 +65,7 @@ def create_user(username: str, password: str, role: str, full_name: str | None =
             s.rollback()
             raise AuthError(f"Username {username!r} already exists") from e
         s.add(AuditLog(user_id=actor_id, action="create_user", entity_type="user", entity_id=user.id,
-                       detail_json=f'{{"username":"{username}","role":"{role}"}}'))
+                       detail_json=json.dumps({"username": username, "role": role})))
         s.commit()
         return user.id
 
@@ -78,7 +79,7 @@ def set_user_active(user_id: int, active: bool, actor_id: int | None = None) -> 
         u.failed_logins = 0
         u.locked_until = None
         s.add(AuditLog(user_id=actor_id, action="set_active", entity_type="user", entity_id=user_id,
-                       detail_json=f'{{"active":{str(active).lower()}}}'))
+                       detail_json=json.dumps({"active": bool(active)})))
         s.commit()
 
 

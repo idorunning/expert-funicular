@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMainWindow, QStackedWidget
+from PySide6.QtWidgets import QMainWindow, QMessageBox, QStackedWidget
 
 from ..auth.service import logout
 from .admin_users_view import AdminUsersView
@@ -65,11 +65,23 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.settings)
 
     def _show_clients(self) -> None:
+        if self._detail is not None and self._detail.is_processing():
+            QMessageBox.information(
+                self, "Processing in progress",
+                "Files are still being imported — wait for that to finish before navigating away."
+            )
+            return
         self.clients.refresh()
         self.stack.setCurrentWidget(self.clients)
 
     def _open_client_detail(self, client_id: int, name: str) -> None:
         if self._detail is not None:
+            if self._detail.is_processing():
+                QMessageBox.information(
+                    self, "Processing in progress",
+                    "Files are still being imported — wait for that to finish before opening another client."
+                )
+                return
             self.stack.removeWidget(self._detail)
             self._detail.deleteLater()
         self._detail = ClientDetailView(client_id, name)

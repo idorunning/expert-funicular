@@ -1,6 +1,7 @@
 """Client CRUD and per-client folder management."""
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -69,7 +70,7 @@ def create_client(display_name: str, reference: str | None = None) -> ClientReco
         folder = _allocate_folder(display_name, c.id)
         c.folder_path = str(folder)
         s.add(AuditLog(user_id=user.id, action="create_client", entity_type="client", entity_id=c.id,
-                       detail_json=f'{{"display_name":"{display_name}"}}'))
+                       detail_json=json.dumps({"display_name": display_name})))
         s.commit()
         return ClientRecord(c.id, c.display_name, c.reference, c.folder_path, c.created_at, c.archived_at)
 
@@ -107,7 +108,7 @@ def rename_client(client_id: int, new_name: str) -> ClientRecord:
             raise ClientError("Client not found")
         c.display_name = new_name
         s.add(AuditLog(user_id=user.id, action="rename_client", entity_type="client", entity_id=c.id,
-                       detail_json=f'{{"display_name":"{new_name}"}}'))
+                       detail_json=json.dumps({"display_name": new_name})))
         s.commit()
         return ClientRecord(c.id, c.display_name, c.reference, c.folder_path, c.created_at, c.archived_at)
 
