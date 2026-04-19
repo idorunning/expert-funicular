@@ -80,6 +80,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("BrokerLedger — Mortgage Oasis")
         self.resize(1280, 820)
+        self.setMinimumSize(1024, 640)
 
         container = QWidget()
         container.setObjectName("centralWidget")

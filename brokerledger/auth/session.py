@@ -12,6 +12,7 @@ class CurrentUser:
     role: str
     full_name: str | None
     photo_path: str | None = None
+    email: str | None = None
 
 
 _current: ContextVar[CurrentUser | None] = ContextVar("current_user", default=None)

@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -137,13 +139,31 @@ class SettingsView(QWidget):
         super().__init__()
         self.setWindowTitle("Settings")
 
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(scroll)
+
+        body = QWidget()
+        scroll.setWidget(body)
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(20, 16, 20, 20)
+        layout.setSpacing(14)
 
         header = QHBoxLayout()
+        header.setSpacing(12)
         back = QPushButton("← Back")
         back.clicked.connect(self.back_requested.emit)
         header.addWidget(back)
-        header.addWidget(QLabel("<h1>Settings</h1>"))
+        title = QLabel("Settings")
+        title.setStyleSheet(
+            "QLabel { font-size: 22px; font-weight: 600; color: #1F1030; }"
+        )
+        header.addWidget(title)
         header.addStretch(1)
         layout.addLayout(header)
 
@@ -160,11 +180,14 @@ class SettingsView(QWidget):
     def _build_profile_panel(self) -> QGroupBox:
         box = QGroupBox("Profile")
         layout = QHBoxLayout(box)
+        layout.setContentsMargins(12, 18, 12, 12)
+        layout.setSpacing(14)
 
         self.avatar = AvatarLabel(size=84)
-        layout.addWidget(self.avatar)
+        layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignTop)
 
         meta = QVBoxLayout()
+        meta.setSpacing(4)
         self.profile_name = QLabel("—")
         self.profile_name.setStyleSheet("QLabel { font-weight: 600; font-size: 14px; }")
         self.profile_meta = QLabel("—")

@@ -94,9 +94,15 @@ class ClientsView(QWidget):
         super().__init__()
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
 
         header = QHBoxLayout()
-        self.title = QLabel("<h1>Clients</h1>")
+        header.setSpacing(10)
+        self.title = QLabel("Clients")
+        self.title.setStyleSheet(
+            "QLabel { font-size: 22px; font-weight: 600; color: #1F1030; }"
+        )
         header.addWidget(self.title)
         header.addStretch(1)
         self.user_label = QLabel()

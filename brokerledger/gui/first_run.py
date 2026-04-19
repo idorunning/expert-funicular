@@ -34,11 +34,17 @@ class FirstRunDialog(QDialog):
         layout.addWidget(intro)
 
         form = QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+        self.full_name = QLineEdit()
+        self.full_name.setPlaceholderText("Your name")
+        form.addRow("Full name", self.full_name)
+        self.email = QLineEdit()
+        self.email.setPlaceholderText("you@example.com")
+        form.addRow("Email", self.email)
         self.username = QLineEdit()
         self.username.setText("admin")
         form.addRow("Username", self.username)
-        self.full_name = QLineEdit()
-        form.addRow("Full name (optional)", self.full_name)
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         form.addRow("Password", self.password)
@@ -96,6 +102,7 @@ class FirstRunDialog(QDialog):
                 self.password.text(),
                 role="admin",
                 full_name=self.full_name.text().strip() or None,
+                email=self.email.text().strip() or None,
             )
             login(self.username.text().strip(), self.password.text())
         except AuthError as e:

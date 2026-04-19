@@ -42,11 +42,16 @@ def init_engine(db_file: Path | None = None, echo: bool = False) -> Engine:
 
 
 def _ensure_user_photo_column(engine: Engine) -> None:
-    """Idempotent backfill: add users.photo_path when missing (pre-existing DBs)."""
+    """Idempotent backfills on the users table so pre-existing DBs upgrade cleanly."""
     with engine.begin() as c:
         cols = {row[1] for row in c.exec_driver_sql("PRAGMA table_info(users)").fetchall()}
         if "photo_path" not in cols:
             c.exec_driver_sql("ALTER TABLE users ADD COLUMN photo_path TEXT")
+        if "email" not in cols:
+            c.exec_driver_sql("ALTER TABLE users ADD COLUMN email TEXT")
+            c.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users (email)"
+            )
 
 
 def get_engine() -> Engine:

@@ -32,6 +32,7 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String(80), unique=True, index=True, nullable=False)
+    email: Mapped[str | None] = mapped_column(String(200), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     full_name: Mapped[str | None] = mapped_column(String(120))
@@ -43,6 +44,18 @@ class User(Base):
     photo_path: Mapped[str | None] = mapped_column(String(500))
 
     __table_args__ = (CheckConstraint("role IN ('admin','broker')", name="ck_user_role"),)
+
+
+class PasswordResetRequest(Base):
+    __tablename__ = "password_reset_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    email_submitted: Mapped[str] = mapped_column(String(200), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column()
+    resolved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
 
 
 class Client(Base):

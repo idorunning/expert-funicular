@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QDateEdit,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -84,14 +86,33 @@ class ClientDetailView(QWidget):
         self._recategorize_worker = None
         self._pending_paths: list[Path] = []
 
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(scroll)
+
+        body = QWidget()
+        scroll.setWidget(body)
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(20, 16, 20, 20)
+        layout.setSpacing(12)
 
         header = QHBoxLayout()
+        header.setSpacing(12)
         self.back_btn = QPushButton("← Clients")
         self.back_btn.clicked.connect(self.back_requested.emit)
         header.addWidget(self.back_btn)
         header.addStretch(1)
-        header.addWidget(QLabel(f"<h1>{client_name}</h1>"))
+        title_label = QLabel(client_name)
+        title_label.setStyleSheet(
+            "QLabel { font-size: 22px; font-weight: 600; color: #1F1030; }"
+        )
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.addWidget(title_label)
         header.addStretch(1)
         layout.addLayout(header)
 
@@ -100,10 +121,12 @@ class ClientDetailView(QWidget):
         layout.addWidget(self.dropzone)
 
         actions = QHBoxLayout()
+        actions.setSpacing(8)
         browse = QPushButton("Browse files…")
         browse.clicked.connect(self._browse)
         actions.addWidget(browse)
         self.clear_btn = QPushButton("Clear queue")
+        self.clear_btn.setObjectName("GhostButton")
         self.clear_btn.clicked.connect(self._clear_queue)
         self.clear_btn.setEnabled(False)
         actions.addWidget(self.clear_btn)
@@ -130,17 +153,19 @@ class ClientDetailView(QWidget):
         layout.addWidget(self.progress_label)
 
         self.file_log = QListWidget()
-        self.file_log.setMaximumHeight(180)
+        self.file_log.setMaximumHeight(160)
         layout.addWidget(self.file_log)
         self._queue_items: dict[str, QListWidgetItem] = {}
 
         layout.addWidget(self._build_affordability_panel())
+        layout.addStretch(1)
 
         self.refresh()
 
     def _build_affordability_panel(self) -> QGroupBox:
         group = QGroupBox("Affordability summary")
         outer = QVBoxLayout(group)
+        outer.setContentsMargins(12, 18, 12, 12)
         outer.setSpacing(10)
 
         self.live_status = QLabel("")

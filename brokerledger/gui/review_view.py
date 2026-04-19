@@ -206,12 +206,19 @@ class ReviewView(QWidget):
         self.setWindowTitle(f"Review — {client_name}")
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
 
         header = QHBoxLayout()
-        self.title = QLabel(f"<h2>Transactions for {client_name}</h2>")
+        header.setSpacing(12)
+        self.title = QLabel(f"Transactions — {client_name}")
+        self.title.setStyleSheet(
+            "QLabel { font-size: 20px; font-weight: 600; color: #1F1030; }"
+        )
         header.addWidget(self.title)
         header.addStretch(1)
         self.summary = QLabel()
+        self.summary.setWordWrap(True)
         header.addWidget(self.summary)
         layout.addLayout(header)
 
