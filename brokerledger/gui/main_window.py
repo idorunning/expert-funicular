@@ -165,6 +165,11 @@ class MainWindow(QMainWindow):
             detail.review_requested.connect(
                 lambda cid=client_id, n=name: self._open_review(cid, n)
             )
+            detail.review_flagged_requested.connect(
+                lambda count, cid=client_id, n=name: self._open_review(
+                    cid, n, flagged_only=True, flagged_count=count
+                )
+            )
             detail.processing_changed.connect(self._update_busy_indicator)
             self.stack.addWidget(detail)
             self._details[client_id] = detail
@@ -173,11 +178,22 @@ class MainWindow(QMainWindow):
             detail.refresh()
         self.stack.setCurrentWidget(detail)
 
-    def _open_review(self, client_id: int, name: str) -> None:
+    def _open_review(
+        self,
+        client_id: int,
+        name: str,
+        *,
+        flagged_only: bool = False,
+        flagged_count: int | None = None,
+    ) -> None:
         if self._review is not None:
             self.stack.removeWidget(self._review)
             self._review.deleteLater()
-        self._review = ReviewView(client_id, name)
+        self._review = ReviewView(
+            client_id, name,
+            flagged_only=flagged_only,
+            flagged_count=flagged_count,
+        )
         self._review_client_id = client_id
         self._review.back_requested.connect(
             lambda cid=client_id, n=name: self._open_client_detail(cid, n)

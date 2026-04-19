@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from ..auth.service import AuthError, create_user, login
 from ..categorize.llm_client import LLMError, OllamaClient
 from ..config import get_settings
+from .theme import load_logo_pixmap
 
 
 class FirstRunDialog(QDialog):
@@ -24,8 +25,16 @@ class FirstRunDialog(QDialog):
         self.setMinimumWidth(480)
 
         layout = QVBoxLayout(self)
+
+        logo_pm = load_logo_pixmap(height=64)
+        if not logo_pm.isNull():
+            logo_label = QLabel()
+            logo_label.setPixmap(logo_pm)
+            logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(logo_label)
+
         intro = QLabel(
-            "<h2>First run</h2>"
+            "<h2>Welcome</h2>"
             "<p>Create an administrator account. You'll use this to log in and to add more users later.</p>"
             "<p>BrokerLedger runs entirely on this machine. Nothing is sent over the network except to your "
             "local Ollama instance at 127.0.0.1.</p>"

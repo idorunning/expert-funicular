@@ -7,6 +7,7 @@ import httpx
 from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -21,6 +22,8 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSlider,
+    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -29,7 +32,7 @@ from PySide6.QtWidgets import (
 from ..auth.session import get_current, set_current
 from ..categorize import corrections_cache
 from ..categorize.llm_client import LLMError, OllamaClient
-from ..config import get_settings
+from ..config import THRESHOLD_DEFAULTS, get_settings, get_threshold
 from ..db import app_settings
 from ..users import service as users_service
 from ..utils.logging import logger
@@ -171,6 +174,7 @@ class SettingsView(QWidget):
         layout.addWidget(self._build_ai_panel())
         layout.addWidget(self._build_data_panel())
         layout.addWidget(self._build_thresholds_panel())
+        layout.addWidget(self._build_email_panel())
         layout.addStretch(1)
 
         self.refresh()
@@ -326,20 +330,247 @@ class SettingsView(QWidget):
 
     # ---- Thresholds panel ------------------------------------------------
 
+    # (slider range, scale, fmt) per threshold key. Float thresholds use a
+    # 100x-scaled integer slider so we can use QSlider directly.
+    _THRESHOLD_ROWS = [
+        {
+            "key": "fuzzy_high",
+            "label": "Auto-accept merchant matches this confident",
+            "help": "Rule matches at or above this score skip the AI entirely.",
+            "min": 70, "max": 100, "scale": 1,
+            "fmt": lambda v: f"{v}%",
+        },
+        {
+            "key": "fuzzy_low",
+            "label": "Flag weaker matches for human review",
+            "help": "Matches between this and the auto-accept line are sent to Review.",
+            "min": 50, "max": 89, "scale": 1,
+            "fmt": lambda v: f"{v}%",
+        },
+        {
+            "key": "llm_confidence_threshold",
+            "label": "Trust the AI above this confidence",
+            "help": "AI answers below this confidence land in Review.",
+            "min": 30, "max": 95, "scale": 100,
+            "fmt": lambda v: f"{v / 100:.2f}",
+        },
+        {
+            "key": "confirm_weight_threshold",
+            "label": "Treat a rule as confirmed after this many hits",
+            "help": "How many times a merchant must appear before the rule auto-accepts.",
+            "min": 1, "max": 5, "scale": 1,
+            "fmt": lambda v: str(v),
+        },
+        {
+            "key": "global_promote_threshold",
+            "label": "Share a rule across clients after this many agree",
+            "help": "How many different clients must confirm before the rule becomes global.",
+            "min": 2, "max": 10, "scale": 1,
+            "fmt": lambda v: str(v),
+        },
+    ]
+
     def _build_thresholds_panel(self) -> QGroupBox:
-        box = QGroupBox("Categorisation thresholds (read-only)")
-        form = QFormLayout(box)
-        s = get_settings()
-        form.addRow("Fuzzy match (auto-accept ≥)", QLabel(str(s.fuzzy_high)))
-        form.addRow("Fuzzy match (flag between)", QLabel(f"{s.fuzzy_low} – {s.fuzzy_high}"))
-        form.addRow("LLM confidence (flag below)", QLabel(f"{s.llm_confidence_threshold:.2f}"))
-        form.addRow("Rule weight to auto-accept", QLabel(str(s.confirm_weight_threshold)))
-        form.addRow("Clients to promote to global rule", QLabel(str(s.global_promote_threshold)))
-        form.addRow(QLabel(
-            "<i>These are currently controlled via the config file / env vars. "
-            "Expose as editable here later if you want to tune from the UI.</i>"
-        ))
+        box = QGroupBox("Categorisation thresholds")
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(12, 18, 12, 12)
+        outer.setSpacing(8)
+
+        intro = QLabel(
+            "Tune how aggressive the AI is about auto-categorising. "
+            "Drag a slider and click <b>Save thresholds</b> to apply."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("QLabel { color: #6B6679; }")
+        outer.addWidget(intro)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+        self._threshold_sliders: dict[str, tuple[QSlider, QLabel, dict]] = {}
+        for row in self._THRESHOLD_ROWS:
+            key = row["key"]
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setMinimum(row["min"])
+            slider.setMaximum(row["max"])
+            value_label = QLabel("—")
+            value_label.setMinimumWidth(64)
+            value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            slider.valueChanged.connect(
+                lambda v, fn=row["fmt"], lbl=value_label: lbl.setText(fn(v))
+            )
+
+            wrap_layout = QHBoxLayout()
+            wrap_layout.setContentsMargins(0, 0, 0, 0)
+            wrap_layout.setSpacing(10)
+            wrap_layout.addWidget(slider, 1)
+            wrap_layout.addWidget(value_label, 0)
+            wrap_widget = QWidget()
+            wrap_widget.setLayout(wrap_layout)
+
+            label_widget = QLabel(row["label"])
+            label_widget.setWordWrap(True)
+            label_widget.setToolTip(row["help"])
+            form.addRow(label_widget, wrap_widget)
+            self._threshold_sliders[key] = (slider, value_label, row)
+
+        outer.addLayout(form)
+
+        btns = QHBoxLayout()
+        reset_btn = QPushButton("Reset to defaults")
+        reset_btn.clicked.connect(self._reset_thresholds)
+        btns.addWidget(reset_btn)
+        btns.addStretch(1)
+        save_btn = QPushButton("Save thresholds")
+        save_btn.setObjectName("PrimaryButton")
+        save_btn.clicked.connect(self._save_thresholds)
+        btns.addWidget(save_btn)
+        outer.addLayout(btns)
+
+        self._load_thresholds()
         return box
+
+    def _load_thresholds(self) -> None:
+        for key, (slider, label, row) in self._threshold_sliders.items():
+            raw = get_threshold(key)
+            scale = row["scale"]
+            if scale == 100:
+                slider_val = int(round(float(raw) * 100))
+            else:
+                slider_val = int(raw)
+            slider_val = max(row["min"], min(row["max"], slider_val))
+            slider.setValue(slider_val)
+            label.setText(row["fmt"](slider_val))
+
+    def _save_thresholds(self) -> None:
+        for key, (slider, _label, row) in self._threshold_sliders.items():
+            scale = row["scale"]
+            if scale == 100:
+                app_settings.put(key, f"{slider.value() / 100:.4f}")
+            else:
+                app_settings.put(key, str(slider.value()))
+        QMessageBox.information(
+            self, "Saved",
+            "Thresholds saved. The next categorisation run will use them."
+        )
+
+    def _reset_thresholds(self) -> None:
+        for key in self._threshold_sliders:
+            app_settings.delete(key)
+        self._load_thresholds()
+        QMessageBox.information(
+            self, "Reset",
+            "Thresholds restored to defaults."
+        )
+
+    # ---- Email (SMTP) panel ---------------------------------------------
+
+    def _build_email_panel(self) -> QGroupBox:
+        box = QGroupBox("Email (SMTP) — for password reset")
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(12, 18, 12, 12)
+        outer.setSpacing(8)
+
+        intro = QLabel(
+            "Configure an outbound SMTP server to let users reset their own "
+            "password by email. <b>Leave blank</b> to keep the admin-mediated "
+            "reset flow (no network traffic)."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("QLabel { color: #6B6679; }")
+        outer.addWidget(intro)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        self.smtp_host = QLineEdit()
+        self.smtp_host.setPlaceholderText("smtp.example.com")
+        form.addRow("SMTP host", self.smtp_host)
+
+        self.smtp_port = QSpinBox()
+        self.smtp_port.setRange(1, 65535)
+        self.smtp_port.setValue(587)
+        form.addRow("Port", self.smtp_port)
+
+        self.smtp_starttls = QCheckBox("Use STARTTLS (recommended)")
+        self.smtp_starttls.setChecked(True)
+        form.addRow("", self.smtp_starttls)
+
+        self.smtp_username = QLineEdit()
+        self.smtp_username.setPlaceholderText("login username")
+        form.addRow("Username", self.smtp_username)
+
+        self.smtp_password = QLineEdit()
+        self.smtp_password.setPlaceholderText("app password")
+        self.smtp_password.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("Password", self.smtp_password)
+
+        self.smtp_from = QLineEdit()
+        self.smtp_from.setPlaceholderText("no-reply@yourfirm.co.uk")
+        form.addRow("From address", self.smtp_from)
+
+        outer.addLayout(form)
+
+        warn = QLabel(
+            "<i>Credentials are stored in plain text in your local "
+            "BrokerLedger database. Use an app-specific password.</i>"
+        )
+        warn.setWordWrap(True)
+        warn.setStyleSheet("QLabel { color: #96640a; }")
+        outer.addWidget(warn)
+
+        btns = QHBoxLayout()
+        test_btn = QPushButton("Send test email")
+        test_btn.clicked.connect(self._send_test_email)
+        btns.addWidget(test_btn)
+        btns.addStretch(1)
+        save_btn = QPushButton("Save email settings")
+        save_btn.setObjectName("PrimaryButton")
+        save_btn.clicked.connect(self._save_email_settings)
+        btns.addWidget(save_btn)
+        outer.addLayout(btns)
+
+        self._load_email_settings()
+        return box
+
+    def _load_email_settings(self) -> None:
+        self.smtp_host.setText(app_settings.get("smtp_host") or "")
+        self.smtp_port.setValue(app_settings.get_int("smtp_port", 587) or 587)
+        self.smtp_starttls.setChecked(app_settings.get_bool("smtp_starttls", True))
+        self.smtp_username.setText(app_settings.get("smtp_username") or "")
+        self.smtp_password.setText(app_settings.get("smtp_password") or "")
+        self.smtp_from.setText(app_settings.get("smtp_from") or "")
+
+    def _save_email_settings(self) -> None:
+        app_settings.put("smtp_host", self.smtp_host.text().strip())
+        app_settings.put("smtp_port", str(self.smtp_port.value()))
+        app_settings.put("smtp_starttls", "1" if self.smtp_starttls.isChecked() else "0")
+        app_settings.put("smtp_username", self.smtp_username.text().strip())
+        app_settings.put("smtp_password", self.smtp_password.text())
+        app_settings.put("smtp_from", self.smtp_from.text().strip())
+        QMessageBox.information(self, "Saved", "Email settings stored.")
+
+    def _send_test_email(self) -> None:
+        from ..mail import smtp as smtp_mod
+
+        # Save first so the module reads the current values.
+        self._save_email_settings()
+        cu = get_current()
+        if cu is None or not cu.email:
+            QMessageBox.information(
+                self, "No email on file",
+                "Your user account has no email address. Add one in the admin "
+                "view and try again."
+            )
+            return
+        try:
+            smtp_mod.send_test_email(cu.email)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "SMTP test failed", str(e))
+            return
+        QMessageBox.information(
+            self, "Test sent",
+            f"Sent a test message to {cu.email}. Check your inbox."
+        )
 
     # ---- Actions ---------------------------------------------------------
 

@@ -41,7 +41,15 @@ DISCRETIONARY_CATEGORIES: tuple[str, ...] = (
     "Pension contributions",
     "Investments",
     "Insurances",
+    "Gambling",
+    "Fast payments / person-to-person",
 )
+
+# Risk categories — always land in Review regardless of confidence.
+RISK_CATEGORIES: frozenset[str] = frozenset({
+    "Gambling",
+    "Fast payments / person-to-person",
+})
 
 # Internal categories — filtered out of committed/discretionary totals.
 INCOME_CATEGORIES: tuple[str, ...] = ("Salary/Wages", "Other income")

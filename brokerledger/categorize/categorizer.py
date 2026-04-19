@@ -7,14 +7,20 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
+from ..config import get_settings, get_threshold
 from ..db.engine import session_scope
 from ..db.models import Transaction, utcnow
 from ..utils.logging import logger
 from .llm_client import LLMClient, LLMError, get_llm_client
 from .memory import retrieve_few_shot
 from .rules import find_exact, fuzzy_topk, touch_rule_last_seen
-from .taxonomy import GROUP_EXCLUDED, GROUP_INCOME, group_of
+from .taxonomy import (
+    GROUP_DISCRETIONARY,
+    GROUP_EXCLUDED,
+    GROUP_INCOME,
+    RISK_CATEGORIES,
+    group_of,
+)
 
 
 @dataclass
@@ -25,6 +31,22 @@ class Decision:
     source: str
     reason: str
     needs_review: bool
+
+
+def _escalate_if_risk(d: Decision) -> Decision:
+    """High-risk categories always land in Review; cap confidence below High tier."""
+    if d.category not in RISK_CATEGORIES:
+        return d
+    suffix = " [auto-flagged: high-risk category]"
+    reason = d.reason if suffix in d.reason else (d.reason + suffix)
+    return Decision(
+        category=d.category,
+        group=d.group,
+        confidence=min(d.confidence, 0.84),
+        source=d.source,
+        reason=reason,
+        needs_review=True,
+    )
 
 
 def _decide(
@@ -40,32 +62,47 @@ def _decide(
 ) -> Decision:
     settings = get_settings()
 
+    # 0. P2P / Faster-Payment short-circuit.
+    # The normaliser appends a "[FP]" tag whenever it detects a Faster
+    # Payment / BACS / bank-transfer prefix — these payments can't reliably
+    # be categorised from the payee name, and the broker wants every one of
+    # them to land in Review.
+    if "[FP]" in merchant and direction == "debit":
+        return _escalate_if_risk(Decision(
+            category="Fast payments / person-to-person",
+            group=GROUP_DISCRETIONARY,
+            confidence=0.9,
+            source="rule",
+            reason="Faster Payment / person-to-person transfer detected",
+            needs_review=True,
+        ))
+
     # 1. Exact rule.
     exact = find_exact(session, merchant, client_id)
-    if exact is not None and exact.weight >= settings.confirm_weight_threshold:
+    if exact is not None and exact.weight >= get_threshold("confirm_weight_threshold"):
         touch_rule_last_seen(session, merchant, exact.category)
-        return Decision(
+        return _escalate_if_risk(Decision(
             category=exact.category,
             group=group_of(exact.category),
             confidence=0.99,
             source="rule",
             reason=f"exact match (scope={exact.scope}, weight={exact.weight})",
             needs_review=False,
-        )
+        ))
 
     # 2. Fuzzy rule.
     fuzzy = fuzzy_topk(session, merchant, k=5)
     top = fuzzy[0] if fuzzy else None
-    if top is not None and top.score >= settings.fuzzy_high:
+    if top is not None and top.score >= get_threshold("fuzzy_high"):
         touch_rule_last_seen(session, merchant, top.category)
-        return Decision(
+        return _escalate_if_risk(Decision(
             category=top.category,
             group=group_of(top.category),
             confidence=0.9,
             source="rule",
             reason=f"fuzzy match score={top.score:.0f}",
             needs_review=False,
-        )
+        ))
 
     # 3. LLM with few-shot.
     few_shot = retrieve_few_shot(session, merchant=merchant, client_id=client_id, k=settings.few_shot_k)
@@ -98,33 +135,35 @@ def _decide(
             posted_date=posted_date,
             few_shot=few_shot,
         )
-        return Decision(
+        return _escalate_if_risk(Decision(
             category=kw.category,
             group=kw.group,
             confidence=min(kw.confidence, 0.35),
             source="llm",
             reason=f"keyword fallback (AI unavailable: {last_err})",
             needs_review=True,
-        )
+        ))
 
     # 4. Flag-for-review logic.
+    fuzzy_low = get_threshold("fuzzy_low")
+    fuzzy_high = get_threshold("fuzzy_high")
     needs_review = False
-    if out.confidence < settings.llm_confidence_threshold:
+    if out.confidence < get_threshold("llm_confidence_threshold"):
         needs_review = True
-    if top is not None and settings.fuzzy_low <= top.score < settings.fuzzy_high and top.category != out.category:
+    if top is not None and fuzzy_low <= top.score < fuzzy_high and top.category != out.category:
         needs_review = True
     if exact is None and top is None:
         needs_review = True
 
     source = "rule+llm" if top is not None else "llm"
-    return Decision(
+    return _escalate_if_risk(Decision(
         category=out.category,
         group=out.group,
         confidence=out.confidence,
         source=source,
         reason=out.reason,
         needs_review=needs_review,
-    )
+    ))
 
 
 def categorize_statement(

@@ -200,7 +200,14 @@ class ReviewView(QWidget):
     export_requested = Signal()
     affordability_requested = Signal()
 
-    def __init__(self, client_id: int, client_name: str) -> None:
+    def __init__(
+        self,
+        client_id: int,
+        client_name: str,
+        *,
+        flagged_only: bool = False,
+        flagged_count: int | None = None,
+    ) -> None:
         super().__init__()
         self.client_id = client_id
         self.setWindowTitle(f"Review — {client_name}")
@@ -208,6 +215,18 @@ class ReviewView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
+
+        # Magenta call-out when we arrive here because the importer flagged rows
+        # for human review. Hidden by default.
+        self.flagged_banner = QLabel()
+        self.flagged_banner.setWordWrap(True)
+        self.flagged_banner.setStyleSheet(
+            "QLabel { background-color: #F5E6F0; color: #5A1044;"
+            " border: 1px solid #C33E8F; border-radius: 6px;"
+            " padding: 10px 14px; font-weight: 600; }"
+        )
+        self.flagged_banner.setVisible(False)
+        layout.addWidget(self.flagged_banner)
 
         header = QHBoxLayout()
         header.setSpacing(12)
@@ -245,7 +264,7 @@ class ReviewView(QWidget):
                                    QAbstractItemView.EditTrigger.SelectedClicked |
                                    QAbstractItemView.EditTrigger.AnyKeyPressed)
         self.table.setItemDelegateForColumn(4, CategoryDelegate(self.table))
-        self.model = TransactionsModel(client_id=client_id, flagged_only=False)
+        self.model = TransactionsModel(client_id=client_id, flagged_only=flagged_only)
         self.table.setModel(self.model)
         for i, (_name, width) in enumerate(COLUMNS):
             self.table.setColumnWidth(i, width)
@@ -256,10 +275,28 @@ class ReviewView(QWidget):
         self.refresh_summary()
         self.model.dataChanged.connect(lambda *_: self.refresh_summary())
 
+        if flagged_only:
+            # Silence the toggled signal so it doesn't re-reload the model
+            # we just built with the right filter.
+            self.flag_only.blockSignals(True)
+            self.flag_only.setChecked(True)
+            self.flag_only.blockSignals(False)
+        if flagged_count is not None and flagged_count > 0:
+            noun = "transaction" if flagged_count == 1 else "transactions"
+            self.flagged_banner.setText(
+                f"⚑ {flagged_count} {noun} need your review. "
+                "Everything else was auto-categorised with high confidence."
+            )
+            self.flagged_banner.setVisible(True)
+
     def _on_flag_toggled(self, checked: bool) -> None:
         self.model.flagged_only = checked
         self.model.reload()
         self.refresh_summary()
+        # Once the user steers away from the flagged view, drop the banner —
+        # it's a one-shot call-out, not a persistent status bar.
+        if not checked:
+            self.flagged_banner.setVisible(False)
 
     def refresh_summary(self) -> None:
         with session_scope() as s:

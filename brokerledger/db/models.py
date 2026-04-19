@@ -56,6 +56,11 @@ class PasswordResetRequest(Base):
     created_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow)
     resolved_at: Mapped[datetime | None] = mapped_column()
     resolved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    # Emailed reset-code flow. Hash (argon2) of the 6-digit numeric code the
+    # user receives by email, plus expiry. Hashed so leaking the DB doesn't
+    # leak the in-flight reset code.
+    code_hash: Mapped[str | None] = mapped_column(String(256))
+    code_expires_at: Mapped[datetime | None] = mapped_column()
 
 
 class Client(Base):

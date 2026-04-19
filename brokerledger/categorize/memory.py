@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
+from ..config import get_threshold
 from ..db.models import AuditLog, MerchantRule, Transaction, utcnow
 from . import corrections_cache
 from .prompts import FewShotExample
@@ -80,7 +80,6 @@ def apply_correction(
 ) -> CorrectionOutcome:
     """Called when a user amends a transaction's category."""
     merchant = tx.merchant_normalized
-    settings = get_settings()
 
     # 1. Client-scope rule (strong personal preference).
     _upsert(session, merchant=merchant, category=new_category, scope="client",
@@ -105,7 +104,7 @@ def apply_correction(
         )
     ).scalar_one()
     promoted = False
-    if distinct_clients >= settings.global_promote_threshold:
+    if distinct_clients >= get_threshold("global_promote_threshold"):
         upserted = _upsert(
             session,
             merchant=merchant,

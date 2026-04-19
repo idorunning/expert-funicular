@@ -55,3 +55,50 @@ def get_settings() -> Settings:
 def reset_settings_for_tests() -> None:
     global _settings
     _settings = None
+
+
+# Keys the user can override live in the Settings UI. Values are stored in the
+# AppSetting key/value table and read on every categorisation to keep the
+# feedback loop tight — these five reads per transaction are cheap.
+_THRESHOLD_KEYS: dict[str, type] = {
+    "fuzzy_high": int,
+    "fuzzy_low": int,
+    "llm_confidence_threshold": float,
+    "confirm_weight_threshold": int,
+    "global_promote_threshold": int,
+}
+
+
+def get_threshold(name: str):
+    """Return the user-tuned threshold from the DB, or the env/default value.
+
+    Falls back to ``get_settings()`` so existing tests that monkey-patch the
+    Pydantic settings object keep working.
+    """
+    if name not in _THRESHOLD_KEYS:
+        raise KeyError(f"Unknown threshold: {name!r}")
+    cast = _THRESHOLD_KEYS[name]
+    # Lazy import to avoid circulars (db -> config -> db).
+    try:
+        from .db import app_settings
+    except Exception:
+        return getattr(get_settings(), name)
+    try:
+        if cast is float:
+            val = app_settings.get_float(name)
+        else:
+            val = app_settings.get_int(name)
+    except Exception:
+        val = None
+    if val is not None:
+        return val
+    return getattr(get_settings(), name)
+
+
+THRESHOLD_DEFAULTS: dict[str, float | int] = {
+    "fuzzy_high": 92,
+    "fuzzy_low": 80,
+    "llm_confidence_threshold": 0.70,
+    "confirm_weight_threshold": 2,
+    "global_promote_threshold": 3,
+}

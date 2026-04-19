@@ -186,3 +186,70 @@ def test_recategorize_client_returns_zero_when_all_user_corrected(logged_in_admi
 def test_recategorize_client_returns_zero_for_no_transactions(logged_in_admin):
     client = create_client("Empty Client")
     assert recategorize_client(client.id, llm=FakeLLMClient()) == 0
+
+
+def _write_risk_csv(tmp_path: Path) -> Path:
+    """Statement containing a gambling brand and a Faster Payment to a person."""
+    p = tmp_path / "risky.csv"
+    p.write_text(
+        "Date,Description,Debit,Credit,Balance\n"
+        "02/03/2025,BET365 DEP,50.00,,1000.00\n"
+        "03/03/2025,FASTER PAYMENT JOHN SMITH,75.00,,925.00\n"
+        "04/03/2025,TESCO STORES LONDON GB,12.40,,912.60\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def test_gambling_is_flagged(logged_in_admin, tmp_path: Path):
+    client = create_client("Risk Gambling Client")
+    csv_path = _write_risk_csv(tmp_path)
+    result = ingest_statement(client.id, csv_path)
+    categorize_statement(result.statement_id, llm=FakeLLMClient())
+
+    with session_scope() as s:
+        row = s.execute(
+            select(Transaction).where(
+                Transaction.client_id == client.id,
+                Transaction.description_raw == "BET365 DEP",
+            )
+        ).scalar_one()
+    assert row.category == "Gambling"
+    assert row.category_group == "discretionary"
+    assert row.needs_review == 1
+    assert row.confidence is not None and row.confidence <= 0.84
+
+
+def test_fast_payments_is_flagged(logged_in_admin, tmp_path: Path):
+    client = create_client("Risk P2P Client")
+    csv_path = _write_risk_csv(tmp_path)
+    result = ingest_statement(client.id, csv_path)
+    categorize_statement(result.statement_id, llm=FakeLLMClient())
+
+    with session_scope() as s:
+        row = s.execute(
+            select(Transaction).where(
+                Transaction.client_id == client.id,
+                Transaction.description_raw == "FASTER PAYMENT JOHN SMITH",
+            )
+        ).scalar_one()
+    assert row.category == "Fast payments / person-to-person"
+    assert row.needs_review == 1
+    assert row.confidence is not None and row.confidence <= 0.84
+
+
+def test_thresholds_from_app_settings_override_env(logged_in_admin):
+    from brokerledger.config import THRESHOLD_DEFAULTS, get_threshold
+    from brokerledger.db import app_settings
+
+    assert get_threshold("fuzzy_high") == THRESHOLD_DEFAULTS["fuzzy_high"]
+    assert get_threshold("llm_confidence_threshold") == THRESHOLD_DEFAULTS["llm_confidence_threshold"]
+
+    app_settings.put("fuzzy_high", "77")
+    app_settings.put("llm_confidence_threshold", "0.42")
+    try:
+        assert get_threshold("fuzzy_high") == 77
+        assert abs(get_threshold("llm_confidence_threshold") - 0.42) < 1e-9
+    finally:
+        app_settings.delete("fuzzy_high")
+        app_settings.delete("llm_confidence_threshold")

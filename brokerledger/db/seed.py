@@ -73,6 +73,55 @@ _BOOTSTRAP_RULES: dict[str, str] = {
 }
 
 
+# UK gambling brands — flagged as risk in the categoriser every time.
+_GAMBLING_RULES: dict[str, str] = {
+    "BET365": "Gambling",
+    "PADDY POWER": "Gambling",
+    "PADDYPOWER": "Gambling",
+    "SKYBET": "Gambling",
+    "SKY BET": "Gambling",
+    "SKY VEGAS": "Gambling",
+    "SKY BINGO": "Gambling",
+    "WILLIAM HILL": "Gambling",
+    "BETFAIR": "Gambling",
+    "LADBROKES": "Gambling",
+    "CORAL": "Gambling",
+    "32RED": "Gambling",
+    "CASUMO": "Gambling",
+    "BETWAY": "Gambling",
+    "UNIBET": "Gambling",
+    "BETFRED": "Gambling",
+    "MRQ": "Gambling",
+    "BETVICTOR": "Gambling",
+    "LEOVEGAS": "Gambling",
+    "GROSVENOR": "Gambling",
+    "VIRGIN GAMES": "Gambling",
+    "POKERSTARS": "Gambling",
+    "888CASINO": "Gambling",
+    "888 CASINO": "Gambling",
+}
+
+
+# Peer-to-peer / remittance platforms. Faster Payments themselves are caught by
+# the `[FP]` tag short-circuit in the categoriser — these rules catch cases
+# where the payee name survives normalisation intact.
+_FAST_PAYMENT_RULES: dict[str, str] = {
+    "PAYPAL": "Fast payments / person-to-person",
+    "REVOLUT": "Fast payments / person-to-person",
+    "WISE": "Fast payments / person-to-person",
+    "TRANSFERWISE": "Fast payments / person-to-person",
+    "MONZO": "Fast payments / person-to-person",
+    "STARLING": "Fast payments / person-to-person",
+    "CASHAPP": "Fast payments / person-to-person",
+    "VENMO": "Fast payments / person-to-person",
+    "ZELLE": "Fast payments / person-to-person",
+}
+
+# Merge risk rules into the master bootstrap table.
+_BOOTSTRAP_RULES.update(_GAMBLING_RULES)
+_BOOTSTRAP_RULES.update(_FAST_PAYMENT_RULES)
+
+
 def seed_categories(session: Session) -> int:
     existing = set(session.execute(select(Category.name)).scalars())
     added = 0

@@ -38,6 +38,7 @@ def init_engine(db_file: Path | None = None, echo: bool = False) -> Engine:
     _SessionFactory = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
     Base.metadata.create_all(_engine)
     _ensure_user_photo_column(_engine)
+    _ensure_password_reset_code_columns(_engine)
     return _engine
 
 
@@ -51,6 +52,25 @@ def _ensure_user_photo_column(engine: Engine) -> None:
             c.exec_driver_sql("ALTER TABLE users ADD COLUMN email TEXT")
             c.exec_driver_sql(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users (email)"
+            )
+
+
+def _ensure_password_reset_code_columns(engine: Engine) -> None:
+    """Add SMTP-reset code columns to pre-existing password_reset_requests tables."""
+    with engine.begin() as c:
+        cols = {
+            row[1]
+            for row in c.exec_driver_sql(
+                "PRAGMA table_info(password_reset_requests)"
+            ).fetchall()
+        }
+        if "code_hash" not in cols:
+            c.exec_driver_sql(
+                "ALTER TABLE password_reset_requests ADD COLUMN code_hash TEXT"
+            )
+        if "code_expires_at" not in cols:
+            c.exec_driver_sql(
+                "ALTER TABLE password_reset_requests ADD COLUMN code_expires_at DATETIME"
             )
 
 

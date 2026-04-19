@@ -31,7 +31,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from sqlalchemy import func, select
+
 from ..affordability.calculator import compute_for_client
+from ..db.engine import session_scope
+from ..db.models import Transaction
 from ..categorize.taxonomy import (
     COMMITTED_CATEGORIES,
     DISCRETIONARY_CATEGORIES,
@@ -41,6 +45,7 @@ from ..categorize.taxonomy import (
     INCOME_CATEGORIES,
     group_of,
 )
+from ..export.csv import export_transactions_csv
 from ..export.xlsx import export_client_workbook
 from .theme import BRAND_MAGENTA, BRAND_PURPLE_SOFT, SUCCESS
 from .widgets.dropzone import DropZone
@@ -75,6 +80,9 @@ class ClientDetailView(QWidget):
     back_requested = Signal()
     review_requested = Signal()
     processing_changed = Signal(bool)
+    # Emitted after ingest / re-categorisation when at least one transaction
+    # needs human review. Carries the flagged count.
+    review_flagged_requested = Signal(int)
 
     def __init__(self, client_id: int, client_name: str) -> None:
         super().__init__()
@@ -270,7 +278,8 @@ class ClientDetailView(QWidget):
         self.review_btn.clicked.connect(self.review_requested.emit)
         buttons.addWidget(self.review_btn)
         buttons.addStretch(1)
-        export_btn = QPushButton("Export XLSX…")
+        export_btn = QPushButton("Export…")
+        export_btn.setToolTip("Export to Excel, Google Sheets (CSV) or a plain text file")
         export_btn.clicked.connect(self._export)
         buttons.addWidget(export_btn)
         outer.addLayout(buttons)
@@ -599,6 +608,8 @@ class ClientDetailView(QWidget):
             if fail == 0
             else f"{ok} imported, {fail} failed — review totals below"
         )
+        if ok > 0:
+            self._maybe_emit_flagged()
 
     def _on_thread_finished(self) -> None:
         # Fires after the QThread's event loop has fully exited. Safe to drop
@@ -610,6 +621,23 @@ class ClientDetailView(QWidget):
 
     def is_processing(self) -> bool:
         return self._thread is not None or self._recategorize_thread is not None
+
+    def _flagged_count(self) -> int:
+        with session_scope() as s:
+            return int(
+                s.execute(
+                    select(func.count()).select_from(Transaction).where(
+                        Transaction.client_id == self.client_id,
+                        Transaction.needs_review == 1,
+                    )
+                ).scalar_one()
+            )
+
+    def _maybe_emit_flagged(self) -> None:
+        """Fire review_flagged_requested so MainWindow can auto-open Review."""
+        count = self._flagged_count()
+        if count > 0:
+            self.review_flagged_requested.emit(count)
 
     def _start_recategorize(self) -> None:
         if self._thread is not None or self._recategorize_thread is not None:
@@ -646,6 +674,7 @@ class ClientDetailView(QWidget):
                 f" — {count} transaction(s) updated"
             )
             self._finish_live_mode(f"{count} transaction(s) re-categorised")
+            self._maybe_emit_flagged()
         else:
             self.progress_label.setText(
                 "<span style='color:#555'>No transactions needed re-categorisation.</span>"
@@ -662,16 +691,44 @@ class ClientDetailView(QWidget):
         self.processing_changed.emit(self.is_processing())
 
     def _export(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export affordability workbook",
-            f"{self.client_name.replace(' ', '_')}_affordability.xlsx",
-            "Excel workbook (*.xlsx)"
+        xlsx_filter = "Excel workbook (*.xlsx)"
+        csv_filter = "Google Sheets / CSV (*.csv)"
+        tsv_filter = "Plain text / tab-separated (*.txt *.tsv)"
+        filters = ";;".join([xlsx_filter, csv_filter, tsv_filter])
+        default_name = f"{self.client_name.replace(' ', '_')}_affordability.xlsx"
+        path, chosen = QFileDialog.getSaveFileName(
+            self, "Export transactions", default_name, filters
         )
         if not path:
             return
-        try:
-            out = export_client_workbook(self.client_id, Path(path), declared_income=self._declared_income())
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "Export failed", str(e))
-            return
+        suffix = Path(path).suffix.lower()
+        if chosen == csv_filter or suffix == ".csv":
+            out_path = Path(path)
+            if out_path.suffix.lower() != ".csv":
+                out_path = out_path.with_suffix(".csv")
+            try:
+                out = export_transactions_csv(self.client_id, out_path, delimiter=",")
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.critical(self, "Export failed", str(e))
+                return
+        elif chosen == tsv_filter or suffix in {".tsv", ".txt"}:
+            out_path = Path(path)
+            if out_path.suffix.lower() not in {".tsv", ".txt"}:
+                out_path = out_path.with_suffix(".txt")
+            try:
+                out = export_transactions_csv(self.client_id, out_path, delimiter="\t")
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.critical(self, "Export failed", str(e))
+                return
+        else:
+            out_path = Path(path)
+            if out_path.suffix.lower() != ".xlsx":
+                out_path = out_path.with_suffix(".xlsx")
+            try:
+                out = export_client_workbook(
+                    self.client_id, out_path, declared_income=self._declared_income()
+                )
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.critical(self, "Export failed", str(e))
+                return
         QMessageBox.information(self, "Export complete", f"Saved to:\n{out}")
