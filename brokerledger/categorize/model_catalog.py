@@ -22,6 +22,7 @@ from dataclasses import dataclass
 STRICTNESS_LEVELS: dict[int, dict[str, float | int]] = {
     1: {
         "fuzzy_high": 98,
+        "fuzzy_medium": 88,
         "fuzzy_low": 60,
         "llm_confidence_threshold": 0.90,
         "confirm_weight_threshold": 4,
@@ -29,6 +30,7 @@ STRICTNESS_LEVELS: dict[int, dict[str, float | int]] = {
     },
     2: {
         "fuzzy_high": 96,
+        "fuzzy_medium": 88,
         "fuzzy_low": 70,
         "llm_confidence_threshold": 0.80,
         "confirm_weight_threshold": 3,
@@ -36,6 +38,7 @@ STRICTNESS_LEVELS: dict[int, dict[str, float | int]] = {
     },
     3: {
         "fuzzy_high": 92,
+        "fuzzy_medium": 85,
         "fuzzy_low": 80,
         "llm_confidence_threshold": 0.70,
         "confirm_weight_threshold": 2,
@@ -43,6 +46,7 @@ STRICTNESS_LEVELS: dict[int, dict[str, float | int]] = {
     },
     4: {
         "fuzzy_high": 88,
+        "fuzzy_medium": 82,
         "fuzzy_low": 75,
         "llm_confidence_threshold": 0.60,
         "confirm_weight_threshold": 2,
@@ -50,6 +54,7 @@ STRICTNESS_LEVELS: dict[int, dict[str, float | int]] = {
     },
     5: {
         "fuzzy_high": 85,
+        "fuzzy_medium": 78,
         "fuzzy_low": 70,
         "llm_confidence_threshold": 0.50,
         "confirm_weight_threshold": 1,

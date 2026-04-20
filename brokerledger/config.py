@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     # Categorisation thresholds.
     fuzzy_high: int = 92
+    fuzzy_medium: int = 85
     fuzzy_low: int = 80
     llm_confidence_threshold: float = 0.70
     confirm_weight_threshold: int = 2
@@ -62,6 +63,7 @@ def reset_settings_for_tests() -> None:
 # feedback loop tight — these five reads per transaction are cheap.
 _THRESHOLD_KEYS: dict[str, type] = {
     "fuzzy_high": int,
+    "fuzzy_medium": int,
     "fuzzy_low": int,
     "llm_confidence_threshold": float,
     "confirm_weight_threshold": int,
@@ -134,6 +136,7 @@ def get_threshold(name: str):
 
 THRESHOLD_DEFAULTS: dict[str, float | int] = {
     "fuzzy_high": 92,
+    "fuzzy_medium": 85,
     "fuzzy_low": 80,
     "llm_confidence_threshold": 0.70,
     "confirm_weight_threshold": 2,

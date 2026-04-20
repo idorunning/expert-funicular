@@ -40,6 +40,7 @@ def init_engine(db_file: Path | None = None, echo: bool = False) -> Engine:
     _ensure_user_photo_column(_engine)
     _ensure_password_reset_code_columns(_engine)
     _ensure_statement_verified_columns(_engine)
+    _ensure_transaction_flags_column(_engine)
     _ensure_audit_log_indexes(_engine)
     return _engine
 
@@ -87,6 +88,17 @@ def _ensure_statement_verified_columns(engine: Engine) -> None:
             c.exec_driver_sql("ALTER TABLE statements ADD COLUMN verified_at DATETIME")
         if "verified_by" not in cols:
             c.exec_driver_sql("ALTER TABLE statements ADD COLUMN verified_by INTEGER")
+
+
+def _ensure_transaction_flags_column(engine: Engine) -> None:
+    """Add the Gambling/Fast-Payment flags column to pre-existing transactions tables."""
+    with engine.begin() as c:
+        cols = {
+            row[1]
+            for row in c.exec_driver_sql("PRAGMA table_info(transactions)").fetchall()
+        }
+        if "flags" not in cols:
+            c.exec_driver_sql("ALTER TABLE transactions ADD COLUMN flags VARCHAR(64)")
 
 
 def _ensure_audit_log_indexes(engine: Engine) -> None:

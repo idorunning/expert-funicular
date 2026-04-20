@@ -16,6 +16,7 @@ class IngestWorker(QObject):
     all_done = Signal(int, int)         # (success_count, failure_count)
     error = Signal(str, str)            # (file_name, message)
     tx_categorized = Signal(str, str, object, str)  # (category, group, amount Decimal, direction)
+    tx_persisted = Signal(int, int)     # (client_id, tx_id) — fires after each row is flushed to DB
 
     def __init__(self, client_id: int, paths: list[Path], current_user) -> None:
         super().__init__()
@@ -48,7 +49,15 @@ class IngestWorker(QObject):
 
                     def _decision_cb(category: str, group: str, amount, direction: str) -> None:
                         self.tx_categorized.emit(category or "", group or "", amount, direction or "")
-                    categorize_statement(result.statement_id, progress_cb=_tx_cb, tx_cb=_decision_cb)
+
+                    def _persisted_cb(client_id: int, tx_id: int) -> None:
+                        self.tx_persisted.emit(client_id, tx_id)
+                    categorize_statement(
+                        result.statement_id,
+                        progress_cb=_tx_cb,
+                        tx_cb=_decision_cb,
+                        tx_id_cb=_persisted_cb,
+                    )
                 self.file_done.emit(result)
                 ok += 1
             except IngestError as e:

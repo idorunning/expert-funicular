@@ -42,10 +42,12 @@ def _write_header(ws, headers: list[str]) -> None:
 
 
 def _transactions_sheet(wb: Workbook, client_id: int) -> None:
+    from ..categorize.flags import deserialize_flags, flag_display_name
+
     ws = wb.create_sheet("Transactions")
     headers = [
         "Date", "Description", "Merchant", "Amount (GBP)", "Direction",
-        "Category", "Group", "Certainty", "Method", "Flagged",
+        "Category", "Group", "Certainty", "Method", "Flags", "Flagged",
     ]
     _write_header(ws, headers)
     with session_scope() as s:
@@ -64,6 +66,7 @@ def _transactions_sheet(wb: Workbook, client_id: int) -> None:
                 r.category_group,
                 round(r.confidence, 3) if r.confidence is not None else None,
                 r.source,
+                ", ".join(flag_display_name(f) for f in deserialize_flags(r.flags)),
                 "Yes" if r.needs_review else "",
             ])
     ws.auto_filter.ref = ws.dimensions

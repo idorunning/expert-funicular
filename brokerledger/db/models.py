@@ -128,6 +128,7 @@ class Transaction(Base):
     needs_review: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
     source: Mapped[str] = mapped_column(String(16), nullable=False, default="llm")
     reason: Mapped[str | None] = mapped_column(Text)
+    flags: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow, onupdate=utcnow)
 
@@ -137,7 +138,7 @@ class Transaction(Base):
     __table_args__ = (
         CheckConstraint("direction IN ('debit','credit')", name="ck_tx_direction"),
         CheckConstraint(
-            "source IN ('rule','llm','user','rule+llm','seed')",
+            "source IN ('rule','llm','user','rule+llm','seed','sibling_auto','register_fuzzy','flag_default')",
             name="ck_tx_source",
         ),
     )

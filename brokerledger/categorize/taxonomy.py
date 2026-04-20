@@ -41,15 +41,12 @@ DISCRETIONARY_CATEGORIES: tuple[str, ...] = (
     "Pension contributions",
     "Investments",
     "Insurances",
-    "Gambling",
-    "Fast payments / person-to-person",
 )
 
-# Risk categories — always land in Review regardless of confidence.
-RISK_CATEGORIES: frozenset[str] = frozenset({
-    "Gambling",
-    "Fast payments / person-to-person",
-})
+# Risk categories — reserved for flag-driven escalation. Gambling and
+# Fast Payments are now transaction-level flags rather than categories, so
+# this set is empty. Kept as a named constant so callers keep compiling.
+RISK_CATEGORIES: frozenset[str] = frozenset()
 
 # Internal categories — filtered out of committed/discretionary totals.
 INCOME_CATEGORIES: tuple[str, ...] = ("Salary/Wages", "Other income")

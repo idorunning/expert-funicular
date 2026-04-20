@@ -12,7 +12,7 @@ from ..db.models import Transaction
 
 COLUMNS = [
     "Date", "Description", "Merchant", "Amount (GBP)", "Direction",
-    "Category", "Group", "Certainty", "Method", "Flagged",
+    "Category", "Group", "Certainty", "Method", "Flags", "Flagged",
 ]
 
 
@@ -27,6 +27,8 @@ def export_transactions_csv(
     ``delimiter=','`` gives a CSV (Google Sheets, Excel), ``'\\t'`` gives a
     tab-separated file that pastes cleanly into any text editor.
     """
+    from ..categorize.flags import deserialize_flags, flag_display_name
+
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with session_scope() as s:
@@ -45,6 +47,7 @@ def export_transactions_csv(
                 r.category_group or "",
                 f"{r.confidence:.2f}" if r.confidence is not None else "",
                 r.source or "",
+                ", ".join(flag_display_name(f) for f in deserialize_flags(r.flags)),
                 "yes" if r.needs_review else "",
             ]
             for r in rows

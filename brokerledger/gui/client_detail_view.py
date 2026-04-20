@@ -84,6 +84,7 @@ class ClientDetailView(QWidget):
     back_requested = Signal()
     review_requested = Signal()
     processing_changed = Signal(bool)
+    tx_persisted = Signal(int, int)  # (client_id, tx_id) — forwarded from workers for live Review updates
     # Emitted after ingest / re-categorisation when at least one transaction
     # needs human review. Carries the flagged count.
     review_flagged_requested = Signal(int)
@@ -680,6 +681,7 @@ class ClientDetailView(QWidget):
         worker.error.connect(self._on_file_error)
         worker.all_done.connect(self._on_all_done)
         worker.tx_categorized.connect(self._on_tx_categorized)
+        worker.tx_persisted.connect(self.tx_persisted.emit)
         # CRITICAL: keep the Python references alive until thread.finished
         # actually fires (the event loop has fully exited). Otherwise GC may
         # destroy the QThread wrapper while Qt is still cleaning up, producing
@@ -924,6 +926,7 @@ class ClientDetailView(QWidget):
         worker.done.connect(self._on_recategorize_done)
         worker.error.connect(self._on_recategorize_error)
         worker.tx_categorized.connect(self._on_tx_categorized)
+        worker.tx_persisted.connect(self.tx_persisted.emit)
         thread.finished.connect(self._on_recategorize_thread_finished)
         thread.start()
         self._update_buttons()

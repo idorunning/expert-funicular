@@ -220,6 +220,10 @@ class MainWindow(QMainWindow):
         self._review.affordability_requested.connect(
             lambda cid=client_id, n=name: self._open_client_detail(cid, n)
         )
+        # Live updates while an ingest/recategorize run is still in flight.
+        detail = self._details.get(client_id)
+        if detail is not None:
+            detail.tx_persisted.connect(self._review.model.on_tx_persisted)
         self.stack.addWidget(self._review)
         self.stack.setCurrentWidget(self._review)
         self._review.setFocus(Qt.FocusReason.OtherFocusReason)

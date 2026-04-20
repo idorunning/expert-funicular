@@ -202,6 +202,8 @@ def _write_risk_csv(tmp_path: Path) -> Path:
 
 
 def test_gambling_is_flagged(logged_in_admin, tmp_path: Path):
+    from brokerledger.categorize.flags import FLAG_GAMBLING, deserialize_flags
+
     client = create_client("Risk Gambling Client")
     csv_path = _write_risk_csv(tmp_path)
     result = ingest_statement(client.id, csv_path)
@@ -214,13 +216,16 @@ def test_gambling_is_flagged(logged_in_admin, tmp_path: Path):
                 Transaction.description_raw == "BET365 DEP",
             )
         ).scalar_one()
-    assert row.category == "Gambling"
-    assert row.category_group == "discretionary"
+    # Smart default for gambling debit = Entertainment, carries gambling flag.
+    assert row.category == "Entertainment"
+    assert FLAG_GAMBLING in deserialize_flags(row.flags)
     assert row.needs_review == 1
-    assert row.confidence is not None and row.confidence <= 0.84
+    assert row.source == "flag_default"
 
 
 def test_fast_payments_is_flagged(logged_in_admin, tmp_path: Path):
+    from brokerledger.categorize.flags import FLAG_FAST_PAYMENT, deserialize_flags
+
     client = create_client("Risk P2P Client")
     csv_path = _write_risk_csv(tmp_path)
     result = ingest_statement(client.id, csv_path)
@@ -233,9 +238,11 @@ def test_fast_payments_is_flagged(logged_in_admin, tmp_path: Path):
                 Transaction.description_raw == "FASTER PAYMENT JOHN SMITH",
             )
         ).scalar_one()
-    assert row.category == "Fast payments / person-to-person"
+    # FP debit = category blank, flag set, always flagged for review.
+    assert row.category in ("", None)
+    assert FLAG_FAST_PAYMENT in deserialize_flags(row.flags)
     assert row.needs_review == 1
-    assert row.confidence is not None and row.confidence <= 0.84
+    assert row.source == "flag_default"
 
 
 def test_thresholds_from_app_settings_override_env(logged_in_admin):

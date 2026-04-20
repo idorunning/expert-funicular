@@ -19,6 +19,12 @@ class CorrectionOutcome:
     new_category: str
     rule_upserted: bool
     promoted_to_global: bool
+    auto_siblings_count: int = 0
+    confirm_siblings: list = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.confirm_siblings is None:
+            object.__setattr__(self, "confirm_siblings", [])
 
 
 def _upsert(
@@ -135,16 +141,37 @@ def apply_correction(
     tx.reason = "corrected by user"
     tx.updated_at = utcnow()
 
-    # 4. Audit.
+    # 4. Sibling learning — propagate to semantically similar transactions
+    #    for the same client. Auto-apply the top band (score ≥ 90), return
+    #    mid-band candidates so the caller can show a confirmation dialog.
+    from .siblings import apply_auto_siblings, find_siblings
+
+    scan = find_siblings(session, source_tx=tx, new_category=new_category)
+    auto_count = apply_auto_siblings(
+        session, source_tx=tx, new_category=new_category, candidates=scan.auto
+    )
+
+    # 5. Audit.
     session.add(AuditLog(
         user_id=user_id,
         action="correct_category",
         entity_type="transaction",
         entity_id=tx.id,
-        detail_json=json.dumps({"merchant": merchant, "to": new_category}),
+        detail_json=json.dumps({
+            "merchant": merchant,
+            "to": new_category,
+            "auto_siblings": auto_count,
+            "confirm_siblings": len(scan.confirm),
+        }),
     ))
 
-    return CorrectionOutcome(new_category=new_category, rule_upserted=True, promoted_to_global=promoted)
+    return CorrectionOutcome(
+        new_category=new_category,
+        rule_upserted=True,
+        promoted_to_global=promoted,
+        auto_siblings_count=auto_count,
+        confirm_siblings=scan.confirm,
+    )
 
 
 def retrieve_few_shot(

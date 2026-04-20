@@ -19,11 +19,15 @@ from PySide6.QtWidgets import (
 from sqlalchemy import select
 
 from ..auth.session import require_login
+from ..categorize.flags import deserialize_flags, flag_display_name
 from ..categorize.memory import apply_correction
+from ..categorize.siblings import apply_auto_siblings
 from ..categorize.taxonomy import group_of, user_visible_categories
 from ..db.engine import session_scope
-from ..db.models import Transaction
+from ..db.models import Transaction, utcnow
 from .widgets.category_delegate import CategoryDelegate
+from .widgets.category_grid_picker import CategoryGridDelegate
+from .widgets.sibling_confirm_dialog import SiblingConfirmDialog
 
 
 COLUMNS = [
@@ -31,6 +35,7 @@ COLUMNS = [
     ("Description", 320),
     ("Merchant",    200),
     ("Amount",      100),
+    ("Flags",       120),
     ("Category",    210),
     ("Group",       120),
     ("Certainty",   110),
@@ -41,10 +46,11 @@ COL_DATE    = 0
 COL_DESC    = 1
 COL_MERC    = 2
 COL_AMT     = 3
-COL_CAT     = 4
-COL_GROUP   = 5
-COL_CERT    = 6
-COL_FLAGGED = 7
+COL_FLAGS   = 4
+COL_CAT     = 5
+COL_GROUP   = 6
+COL_CERT    = 7
+COL_FLAGGED = 8
 
 
 def confidence_tier(confidence: float | None, source: str | None) -> str:
@@ -102,6 +108,7 @@ class TransactionsModel(QAbstractTableModel):
                     "source":      r.source,
                     "needs_review": bool(r.needs_review),
                     "direction":   r.direction,
+                    "flags":       deserialize_flags(r.flags),
                 }
                 for r in rows
             ]
@@ -137,6 +144,8 @@ class TransactionsModel(QAbstractTableModel):
             if col == COL_AMT:
                 v: Decimal = row["amount"]
                 return f"{v:+.2f}"
+            if col == COL_FLAGS:
+                return " ".join(flag_display_name(f) for f in row["flags"])
             if col == COL_CAT:     return row["category"]
             if col == COL_GROUP:   return row["group"]
             if col == COL_CERT:    return confidence_tier(row["confidence"], row["source"])
@@ -146,6 +155,9 @@ class TransactionsModel(QAbstractTableModel):
                 tier = confidence_tier(row["confidence"], row["source"])
                 if tier in _TIER_BG:
                     return QBrush(_TIER_BG[tier])
+            if col == COL_FLAGS and row["flags"]:
+                # Soft magenta wash for flagged rows.
+                return QBrush(QColor(239, 231, 245))
             if row["needs_review"]:
                 return QBrush(QColor(255, 246, 225))
         if role == Qt.ItemDataRole.ForegroundRole:
@@ -153,18 +165,22 @@ class TransactionsModel(QAbstractTableModel):
                 tier = confidence_tier(row["confidence"], row["source"])
                 if tier in _TIER_FG:
                     return QBrush(_TIER_FG[tier])
+            if col == COL_FLAGS and row["flags"]:
+                return QBrush(QColor("#4A1766"))
             if col == COL_FLAGGED and row["needs_review"]:
                 return QBrush(QColor(180, 90, 0))
         if role == Qt.ItemDataRole.FontRole:
             tier = confidence_tier(row["confidence"], row["source"])
             if col == COL_CERT and tier in _TIER_BG:
                 f = QFont(); f.setBold(True); return f
+            if col == COL_FLAGS and row["flags"]:
+                f = QFont(); f.setBold(True); return f
             if col == COL_FLAGGED and row["needs_review"]:
                 f = QFont(); f.setBold(True); return f
         if role == Qt.ItemDataRole.TextAlignmentRole:
             if col == COL_AMT:
                 return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            if col in (COL_CERT, COL_FLAGGED):
+            if col in (COL_FLAGS, COL_CERT, COL_FLAGGED):
                 return Qt.AlignmentFlag.AlignCenter
         return None
 
@@ -183,11 +199,12 @@ class TransactionsModel(QAbstractTableModel):
             return False
         row = self._rows[index.row()]
         user = require_login()
+        outcome = None
         with session_scope() as s:
             tx = s.get(Transaction, row["id"])
             if tx is None:
                 return False
-            apply_correction(s, tx=tx, new_category=new_category, user_id=user.id)
+            outcome = apply_correction(s, tx=tx, new_category=new_category, user_id=user.id)
             s.commit()
 
         # Update the edited row in memory.
@@ -200,7 +217,128 @@ class TransactionsModel(QAbstractTableModel):
         # Auto-propagate to every other non-user row with the same merchant.
         merchant = row["merchant"]
         self._propagate_to_matching_merchant(merchant, new_category)
+
+        # Auto-siblings were already applied in apply_correction — reflect in UI.
+        if outcome is not None and outcome.auto_siblings_count:
+            self._reload_rows_by_id({c.tx_id for c in self._recent_auto_ids(outcome)})
+
+        # Stash confirm candidates for the view to display a dialog.
+        if outcome is not None and outcome.confirm_siblings:
+            self._pending_confirm_siblings = (row["desc"], new_category, outcome.confirm_siblings)
+        else:
+            self._pending_confirm_siblings = None
+
         return True
+
+    # ------------------------------------------------------------------
+    # Sibling helpers
+    # ------------------------------------------------------------------
+
+    def _recent_auto_ids(self, outcome) -> list:
+        # apply_auto_siblings doesn't echo back the candidate list; re-fetch
+        # the relevant rows from DB in a follow-up pass. We keep it simple by
+        # reloading any row in this client whose source is sibling_auto.
+        with session_scope() as s:
+            rows = s.execute(
+                select(Transaction).where(
+                    Transaction.client_id == self.client_id,
+                    Transaction.source == "sibling_auto",
+                )
+            ).scalars().all()
+            from ..categorize.siblings import SiblingCandidate
+            return [
+                SiblingCandidate(
+                    tx_id=r.id,
+                    description=r.description_raw,
+                    merchant=r.merchant_normalized,
+                    current_category=r.category,
+                    score=int((r.confidence or 0) * 100),
+                )
+                for r in rows
+            ]
+
+    def _reload_rows_by_id(self, ids: set[int]) -> None:
+        if not ids:
+            return
+        with session_scope() as s:
+            rows = s.execute(
+                select(Transaction).where(Transaction.id.in_(ids))
+            ).scalars().all()
+            by_id = {r.id: r for r in rows}
+        for i, row in enumerate(self._rows):
+            fresh = by_id.get(row["id"])
+            if fresh is None:
+                continue
+            row["category"]     = fresh.category or ""
+            row["group"]        = fresh.category_group or ""
+            row["source"]       = fresh.source
+            row["confidence"]   = fresh.confidence
+            row["needs_review"] = bool(fresh.needs_review)
+            row["flags"]        = deserialize_flags(fresh.flags)
+            tl = self.index(i, 0)
+            br = self.index(i, self.columnCount() - 1)
+            self.dataChanged.emit(tl, br, [Qt.ItemDataRole.DisplayRole])
+
+    def take_pending_confirm_siblings(self):
+        """Return any pending confirm-siblings tuple and clear it."""
+        val = getattr(self, "_pending_confirm_siblings", None)
+        self._pending_confirm_siblings = None
+        return val
+
+    def on_tx_persisted(self, client_id: int, tx_id: int) -> None:
+        """Live-update hook: called while an ingest/recategorize run is still
+        in-flight. If the row belongs to this client, either update the
+        existing entry or append a new one."""
+        if client_id != self.client_id:
+            return
+        with session_scope() as s:
+            tx = s.get(Transaction, tx_id)
+            if tx is None:
+                return
+            payload = {
+                "id":          tx.id,
+                "date":        tx.posted_date,
+                "desc":        tx.description_raw,
+                "merchant":    tx.merchant_normalized,
+                "amount":      tx.amount,
+                "category":    tx.category or "",
+                "group":       tx.category_group or "",
+                "confidence":  tx.confidence,
+                "source":      tx.source,
+                "needs_review": bool(tx.needs_review),
+                "direction":   tx.direction,
+                "flags":       deserialize_flags(tx.flags),
+            }
+        # Respect the flagged-only filter.
+        if self.flagged_only and not payload["needs_review"]:
+            return
+        for i, row in enumerate(self._rows):
+            if row["id"] == tx_id:
+                self._rows[i] = payload
+                tl = self.index(i, 0)
+                br = self.index(i, self.columnCount() - 1)
+                self.dataChanged.emit(tl, br, [Qt.ItemDataRole.DisplayRole])
+                return
+        insert_at = len(self._rows)
+        self.beginInsertRows(QModelIndex(), insert_at, insert_at)
+        self._rows.append(payload)
+        self.endInsertRows()
+
+    def apply_confirmed_siblings(self, new_category: str, candidates: list) -> int:
+        """Apply ``new_category`` to user-confirmed sibling candidates."""
+        if not candidates:
+            return 0
+        user = require_login()
+        with session_scope() as s:
+            tx_ids = [c.tx_id for c in candidates]
+            first = s.get(Transaction, tx_ids[0]) if tx_ids else None
+            if first is not None:
+                apply_auto_siblings(
+                    s, source_tx=first, new_category=new_category, candidates=candidates,
+                )
+            s.commit()
+        self._reload_rows_by_id({c.tx_id for c in candidates})
+        return len(candidates)
 
     # ------------------------------------------------------------------
     # Bulk confirm (no category change, just mark as user-confirmed)
@@ -398,7 +536,7 @@ class ReviewView(QWidget):
             | QAbstractItemView.EditTrigger.DoubleClicked
         )
 
-        self._delegate = CategoryDelegate(self.table)
+        self._delegate = CategoryGridDelegate(self.table)
         self.table.setItemDelegateForColumn(COL_CAT, self._delegate)
 
         self.model = TransactionsModel(client_id=client_id, flagged_only=flagged_only)
@@ -419,6 +557,7 @@ class ReviewView(QWidget):
 
         # ── Wire up signals ───────────────────────────────────────────────
         self.model.dataChanged.connect(lambda *_: self.refresh_summary())
+        self.model.dataChanged.connect(lambda *_: self._maybe_prompt_siblings())
         self.table.selectionModel().selectionChanged.connect(self._on_selection_changed)
 
         self.refresh_summary()
@@ -464,6 +603,25 @@ class ReviewView(QWidget):
     def _on_selection_changed(self, _selected, _deselected) -> None:
         has = bool(self.table.selectionModel().selectedRows())
         self.confirm_btn.setEnabled(has)
+
+    def _maybe_prompt_siblings(self) -> None:
+        pending = self.model.take_pending_confirm_siblings()
+        if not pending:
+            return
+        source_desc, new_category, candidates = pending
+        if not candidates:
+            return
+        dlg = SiblingConfirmDialog(
+            candidates,
+            new_category=new_category,
+            source_description=source_desc,
+            parent=self,
+        )
+        if dlg.exec() == SiblingConfirmDialog.DialogCode.Accepted:
+            selected = dlg.accepted_candidates()
+            updated = self.model.apply_confirmed_siblings(new_category, selected)
+            if updated:
+                self.refresh_summary()
 
     # ------------------------------------------------------------------
     # Summary bar

@@ -12,6 +12,7 @@ class RecategorizeWorker(QObject):
     done = Signal(int)                 # count of rows updated
     error = Signal(str)
     tx_categorized = Signal(str, str, object, str)  # (category, group, amount, direction)
+    tx_persisted = Signal(int, int)    # (client_id, tx_id) — after DB flush
     starting = Signal()                # emitted before first tx so UI can reset totals
 
     def __init__(self, client_id: int, current_user) -> None:
@@ -28,6 +29,7 @@ class RecategorizeWorker(QObject):
                 self.client_id,
                 progress_cb=self._on_progress,
                 tx_cb=self._on_decision,
+                tx_id_cb=self._on_persisted,
             )
             self.done.emit(count)
         except Exception as e:  # noqa: BLE001
@@ -40,6 +42,9 @@ class RecategorizeWorker(QObject):
 
     def _on_decision(self, category: str, group: str, amount, direction: str) -> None:
         self.tx_categorized.emit(category or "", group or "", amount, direction or "")
+
+    def _on_persisted(self, client_id: int, tx_id: int) -> None:
+        self.tx_persisted.emit(client_id, tx_id)
 
 
 def run_recategorize_in_thread(client_id: int):

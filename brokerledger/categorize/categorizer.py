@@ -11,6 +11,13 @@ from ..config import get_settings, get_threshold
 from ..db.engine import session_scope
 from ..db.models import Transaction, utcnow
 from ..utils.logging import logger
+from .flags import (
+    FLAG_FAST_PAYMENT,
+    FLAG_GAMBLING,
+    detect_flags,
+    serialize_flags,
+    smart_default_category,
+)
 from .llm_client import LLMClient, LLMError, get_llm_client
 from .memory import retrieve_few_shot
 from .rules import find_exact, fuzzy_topk, touch_rule_last_seen
@@ -61,21 +68,25 @@ def _decide(
     llm: LLMClient,
 ) -> Decision:
     settings = get_settings()
+    flags_list = detect_flags(description_raw, merchant)
+    is_credit = direction == "credit"
 
-    # 0. P2P / Faster-Payment short-circuit.
-    # The normaliser appends a "[FP]" tag whenever it detects a Faster
-    # Payment / BACS / bank-transfer prefix — these payments can't reliably
-    # be categorised from the payee name, and the broker wants every one of
-    # them to land in Review.
-    if "[FP]" in merchant and direction == "debit":
-        return _escalate_if_risk(Decision(
-            category="Fast payments / person-to-person",
-            group=GROUP_DISCRETIONARY,
-            confidence=0.9,
-            source="rule",
-            reason="Faster Payment / person-to-person transfer detected",
+    # 0. Flag-based smart default — gambling and fast payments get a
+    # pre-filled category suggestion but always land in Review so the broker
+    # can confirm or override. Normal pipeline is skipped for these rows.
+    if flags_list:
+        smart = smart_default_category(flags_list, is_credit=is_credit)
+        category = smart or ""
+        group = group_of(category) if category else GROUP_DISCRETIONARY
+        flag_names = ", ".join(flags_list)
+        return Decision(
+            category=category,
+            group=group,
+            confidence=0.85 if smart else 0.50,
+            source="flag_default",
+            reason=f"flagged: {flag_names}; smart default applied" if smart else f"flagged: {flag_names}; needs manual category",
             needs_review=True,
-        ))
+        )
 
     # 1. Exact rule.
     exact = find_exact(session, merchant, client_id)
@@ -102,6 +113,19 @@ def _decide(
             source="rule",
             reason=f"fuzzy match score={top.score:.0f}",
             needs_review=False,
+        ))
+    # 2b. Fuzzy-medium — register match but below the auto-apply bar. Use
+    #     the register's answer as a strong hint but keep the row in Review
+    #     so the broker can confirm or override.
+    if top is not None and top.score >= get_threshold("fuzzy_medium"):
+        touch_rule_last_seen(session, merchant, top.category)
+        return _escalate_if_risk(Decision(
+            category=top.category,
+            group=group_of(top.category),
+            confidence=0.75,
+            source="register_fuzzy",
+            reason=f"fuzzy match (medium) score={top.score:.0f}",
+            needs_review=True,
         ))
 
     # 3. LLM with few-shot.
@@ -172,12 +196,17 @@ def categorize_statement(
     llm: LLMClient | None = None,
     progress_cb=None,
     tx_cb=None,
+    tx_id_cb=None,
 ) -> int:
     """Categorise every transaction on a statement. Returns # rows updated.
 
     ``tx_cb(category, group, amount, direction)`` — optional callback invoked
     after each decision so the UI can stream running totals while the LLM
     still processes the rest of the file.
+
+    ``tx_id_cb(client_id, tx_id)`` — optional callback fired once each row is
+    flushed to the DB so UI views (e.g. Review) can refresh a specific row
+    live while ingest continues.
     """
     llm = llm or get_llm_client()
     updated = 0
@@ -211,6 +240,7 @@ def categorize_statement(
             tx.confidence = decision.confidence
             tx.source = decision.source
             tx.reason = decision.reason
+            tx.flags = serialize_flags(detect_flags(tx.description_raw, tx.merchant_normalized))
             tx.needs_review = 1 if decision.needs_review else 0
             tx.updated_at = utcnow()
             updated += 1
@@ -218,6 +248,9 @@ def categorize_statement(
                 progress_cb(idx + 1, total)
             if tx_cb is not None:
                 tx_cb(decision.category, decision.group, tx.amount, tx.direction)
+            s.flush()
+            if tx_id_cb is not None:
+                tx_id_cb(tx.client_id, tx.id)
         s.commit()
     return updated
 
@@ -244,6 +277,7 @@ def recategorize_transaction(tx_id: int, *, llm: LLMClient | None = None) -> Dec
         tx.confidence = decision.confidence
         tx.source = decision.source
         tx.reason = decision.reason
+        tx.flags = serialize_flags(detect_flags(tx.description_raw, tx.merchant_normalized))
         tx.needs_review = 1 if decision.needs_review else 0
         tx.updated_at = utcnow()
         s.commit()
@@ -256,6 +290,7 @@ def recategorize_client(
     llm: LLMClient | None = None,
     progress_cb=None,
     tx_cb=None,
+    tx_id_cb=None,
 ) -> int:
     """Re-run AI categorisation on all non-user transactions for a client.
 
@@ -299,6 +334,7 @@ def recategorize_client(
             tx.confidence = decision.confidence
             tx.source = decision.source
             tx.reason = decision.reason
+            tx.flags = serialize_flags(detect_flags(tx.description_raw, tx.merchant_normalized))
             tx.needs_review = 1 if decision.needs_review else 0
             tx.updated_at = utcnow()
             updated += 1
@@ -306,5 +342,8 @@ def recategorize_client(
                 progress_cb(idx + 1, total)
             if tx_cb is not None:
                 tx_cb(decision.category, decision.group, tx.amount, tx.direction)
+            s.flush()
+            if tx_id_cb is not None:
+                tx_id_cb(tx.client_id, tx.id)
         s.commit()
     return updated
