@@ -128,6 +128,15 @@ class ClientDetailView(QWidget):
         header.addStretch(1)
         layout.addLayout(header)
 
+        self.notice = QLabel("")
+        self.notice.setWordWrap(True)
+        self.notice.setVisible(False)
+        self.notice.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        self.notice.linkActivated.connect(self._on_notice_link)
+        layout.addWidget(self.notice)
+
         self.dropzone = DropZone()
         self.dropzone.files_dropped.connect(self._on_files_queued)
         layout.addWidget(self.dropzone)
@@ -647,6 +656,11 @@ class ClientDetailView(QWidget):
         if self._thread is not None or self._recategorize_thread is not None or not self._pending_paths:
             return
         paths = list(self._pending_paths)
+        self._show_notice(
+            "Thank you! I will let you know once I have finished reviewing "
+            f"{'this file' if len(paths) == 1 else f'these {len(paths)} files'} for you.",
+            tone="info",
+        )
         self.progress.setVisible(True)
         self.progress.setRange(0, len(paths) * 100)
         self.progress.setValue(0)
@@ -757,7 +771,7 @@ class ClientDetailView(QWidget):
         )
         self._refresh_statements_table()
         if ok > 0:
-            self._maybe_emit_flagged()
+            self._notify_completion(context="statements", ok=ok, fail=fail)
 
     def _on_thread_finished(self) -> None:
         # Fires after the QThread's event loop has fully exited. Safe to drop
@@ -786,6 +800,109 @@ class ClientDetailView(QWidget):
         count = self._flagged_count()
         if count > 0:
             self.review_flagged_requested.emit(count)
+
+    # --- User-facing completion notifications --------------------------------
+
+    def _user_greeting_name(self) -> str:
+        cu = get_current()
+        if cu is None:
+            return "there"
+        raw = (cu.full_name or cu.username or "").strip()
+        if not raw:
+            return "there"
+        return raw.split()[0]
+
+    def _show_notice(self, html_or_text: str, *, tone: str = "info") -> None:
+        palette = {
+            "info":    ("#EFE7F5", "#4A1766", "#D6C9E6"),   # soft purple
+            "success": ("#E6F4EA", "#176B1A", "#C7E5CD"),   # soft green
+            "warn":    ("#FDECEA", "#A52D1E", "#F3C8C3"),   # soft red
+        }
+        bg, fg, border = palette.get(tone, palette["info"])
+        self.notice.setStyleSheet(
+            f"QLabel {{ background-color: {bg}; color: {fg}; "
+            f"border: 1px solid {border}; border-radius: 8px; "
+            "padding: 10px 12px; font-size: 14px; }}"
+        )
+        self.notice.setText(html_or_text)
+        self.notice.setVisible(True)
+
+    def _clear_notice(self) -> None:
+        self.notice.setVisible(False)
+        self.notice.setText("")
+
+    def _on_notice_link(self, href: str) -> None:
+        if href == "review-flagged":
+            self.review_flagged_requested.emit(self._flagged_count())
+        elif href == "review":
+            self.review_requested.emit()
+        elif href == "dismiss":
+            self._clear_notice()
+
+    def _notify_completion(
+        self,
+        *,
+        context: str,
+        ok: int | None = None,
+        fail: int | None = None,
+        updated: int | None = None,
+    ) -> None:
+        """Show a friendly banner + modal after ingest / re-categorise.
+
+        ``context`` is 'statements' (after ingest) or 'recategorise'.
+        """
+        greeting = self._user_greeting_name()
+        flagged = self._flagged_count()
+
+        if context == "statements":
+            headline = f"Hi {greeting}, I've finished reviewing the statements."
+            if fail:
+                headline += f" ({ok or 0} imported, {fail} failed.)"
+        else:
+            if updated:
+                headline = (
+                    f"Hi {greeting}, I've finished re-checking every transaction — "
+                    f"{updated} were updated."
+                )
+            else:
+                headline = (
+                    f"Hi {greeting}, I've re-checked every transaction — "
+                    "nothing needed updating."
+                )
+
+        if flagged > 0:
+            body_html = (
+                f"<b>{headline}</b><br>"
+                f"<span>There are <b>{flagged}</b> transaction(s) I'd like you to look at. "
+                f"<a href='review-flagged' style='color:#4A1766;font-weight:600'>"
+                "Please can you review these transactions →</a></span> "
+                "<a href='dismiss' style='color:#6B6679'>dismiss</a>"
+            )
+            self._show_notice(body_html, tone="warn")
+            QMessageBox.information(
+                self,
+                "All done",
+                f"{headline}\n\n"
+                f"There are {flagged} transaction(s) I'd like you to look at. "
+                "Click OK to open the review list.",
+            )
+            self.review_flagged_requested.emit(flagged)
+        else:
+            body_html = (
+                f"<b>{headline}</b><br>"
+                "Everything has been categorised with high confidence — no further "
+                "review needed. "
+                "<a href='review' style='color:#4A1766;font-weight:600'>"
+                "Open the transaction list anyway</a> · "
+                "<a href='dismiss' style='color:#6B6679'>dismiss</a>"
+            )
+            self._show_notice(body_html, tone="success")
+            QMessageBox.information(
+                self,
+                "All done",
+                f"{headline}\n\nNothing needs your review — everything was categorised "
+                "with high confidence.",
+            )
 
     def _start_recategorize(self) -> None:
         if self._thread is not None or self._recategorize_thread is not None:
@@ -822,12 +939,13 @@ class ClientDetailView(QWidget):
                 f" — {count} transaction(s) updated"
             )
             self._finish_live_mode(f"{count} transaction(s) re-categorised")
-            self._maybe_emit_flagged()
+            self._notify_completion(context="recategorise", updated=count)
         else:
             self.progress_label.setText(
                 "<span style='color:#555'>No transactions needed re-categorisation.</span>"
             )
             self._finish_live_mode("no transactions needed updating")
+            self._notify_completion(context="recategorise", updated=0)
 
     def _on_recategorize_error(self, message: str) -> None:
         QMessageBox.critical(self, "Re-categorisation failed", message)

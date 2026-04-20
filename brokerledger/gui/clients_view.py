@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -37,6 +38,7 @@ from ..clients.service import (
     restore_client,
 )
 from ..users import service as users_service
+from .greetings import greeting_for, random_quote
 
 
 class NewClientDialog(QDialog):
@@ -98,28 +100,46 @@ class ClientsView(QWidget):
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
 
+        # Top row — greeting + motivational line + collapsed menu button.
         header = QHBoxLayout()
         header.setSpacing(10)
-        self.title = QLabel("Clients")
-        self.title.setStyleSheet(
+
+        greeting_col = QVBoxLayout()
+        greeting_col.setSpacing(2)
+        self.greeting_label = QLabel("")
+        self.greeting_label.setStyleSheet(
             "QLabel { font-size: 22px; font-weight: 600; color: #1F1030; }"
         )
-        header.addWidget(self.title)
-        header.addStretch(1)
-        self.user_label = QLabel()
-        header.addWidget(self.user_label)
-        self.settings_btn = QPushButton("Settings…")
-        self.settings_btn.clicked.connect(self.settings_requested.emit)
-        header.addWidget(self.settings_btn)
-        self.admin_btn = QPushButton("Admin…")
-        self.admin_btn.clicked.connect(self.admin_requested.emit)
-        header.addWidget(self.admin_btn)
-        self.audit_log_btn = QPushButton("Audit log…")
-        self.audit_log_btn.clicked.connect(self.audit_log_requested.emit)
-        header.addWidget(self.audit_log_btn)
-        logout = QPushButton("Log out")
-        logout.clicked.connect(self.logout_requested.emit)
-        header.addWidget(logout)
+        self.quote_label = QLabel("")
+        self.quote_label.setStyleSheet("QLabel { color: #6B6679; font-size: 13px; }")
+        self.quote_label.setWordWrap(True)
+        greeting_col.addWidget(self.greeting_label)
+        greeting_col.addWidget(self.quote_label)
+        header.addLayout(greeting_col, 1)
+
+        header.addStretch(0)
+
+        self.menu_btn = QToolButton()
+        self.menu_btn.setText("☰  Menu")
+        self.menu_btn.setToolTip("Settings, Admin and Audit log")
+        self.menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.menu_btn.setStyleSheet(
+            "QToolButton { background-color: #4A1766; color: #FFFFFF; "
+            "border: none; border-radius: 8px; padding: 8px 16px; font-weight: 600; }"
+            "QToolButton::menu-indicator { image: none; width: 0px; }"
+            "QToolButton:hover { background-color: #D63A91; }"
+        )
+        self._menu = QMenu(self)
+        self._menu.setToolTipsVisible(True)
+        self.settings_action = self._menu.addAction("Settings…")
+        self.settings_action.triggered.connect(self.settings_requested.emit)
+        self.admin_action = self._menu.addAction("Admin (manage users)…")
+        self.admin_action.triggered.connect(self.admin_requested.emit)
+        self.audit_action = self._menu.addAction("Audit log…")
+        self.audit_action.triggered.connect(self.audit_log_requested.emit)
+        self.menu_btn.setMenu(self._menu)
+        header.addWidget(self.menu_btn)
+
         layout.addLayout(header)
 
         toolbar = QHBoxLayout()
@@ -150,13 +170,19 @@ class ClientsView(QWidget):
         self.table.cellDoubleClicked.connect(self._open_selected)
         layout.addWidget(self.table)
 
-        self.status_label = QLabel("")
+        self.status_label = QLabel("Double-click a client to open, or right-click for more actions.")
         self.status_label.setStyleSheet("QLabel { color: #6B6679; }")
         layout.addWidget(self.status_label)
 
-        open_btn = QPushButton("Open selected client")
-        open_btn.clicked.connect(self._open_selected)
-        layout.addWidget(open_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        bottom = QHBoxLayout()
+        self.user_label = QLabel()
+        bottom.addWidget(self.user_label)
+        bottom.addStretch(1)
+        logout = QPushButton("Log out")
+        logout.setObjectName("GhostButton")
+        logout.clicked.connect(self.logout_requested.emit)
+        bottom.addWidget(logout)
+        layout.addLayout(bottom)
 
         self._records: list[ClientRecord] = []
 
@@ -164,9 +190,19 @@ class ClientsView(QWidget):
         cu = get_current()
         if cu is not None:
             label = cu.full_name or cu.username
-            self.user_label.setText(f"<span style='color:#555'>Signed in as <b>{label}</b> ({cu.role})</span>")
-            self.admin_btn.setVisible(cu.role == "admin")
-            self.audit_log_btn.setVisible(cu.role == "admin")
+            self.user_label.setText(
+                f"<span style='color:#555'>Signed in as <b>{label}</b> ({cu.role})</span>"
+            )
+            first = (label.split()[0] if label else label) or "there"
+            self.greeting_label.setText(greeting_for(first))
+            self.quote_label.setText(random_quote())
+            is_admin = cu.role == "admin"
+            self.admin_action.setVisible(is_admin)
+            self.audit_action.setVisible(is_admin)
+        else:
+            self.greeting_label.setText("Welcome")
+            self.quote_label.setText("")
+            self.user_label.setText("")
         try:
             self._records = list_clients(include_archived=self.show_archived.isChecked())
         except Exception as e:  # noqa: BLE001
@@ -193,9 +229,11 @@ class ClientsView(QWidget):
             id_item = QTableWidgetItem(str(c.id))
             id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(idx, 4, id_item)
+        hint = "Double-click to open, or right-click for more actions."
         self.status_label.setText(
             f"{len(rows)} of {len(self._records)} client(s) shown"
             + (f" — search: '{needle}'" if needle else "")
+            + f"  ·  {hint}"
         )
 
     def _selected_record(self) -> ClientRecord | None:

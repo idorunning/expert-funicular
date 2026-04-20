@@ -1,20 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 80" width="320" height="80">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" width="80" height="80">
   <defs>
     <linearGradient id="brand" x1="0" y1="1" x2="1" y2="0">
       <stop offset="0%" stop-color="#D63A91"/>
       <stop offset="100%" stop-color="#4A1766"/>
     </linearGradient>
   </defs>
-  <rect x="4" y="4" width="72" height="72" rx="14" fill="url(#brand)"/>
-  <g stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" fill="none">
-    <path d="M40 62 V42"/>
-    <path d="M40 42 C 30 34, 22 32, 16 30 C 24 26, 34 28, 40 36"/>
-    <path d="M40 42 C 50 34, 58 32, 64 30 C 56 26, 46 28, 40 36"/>
-    <path d="M40 42 C 36 30, 36 22, 40 16 C 44 22, 44 30, 40 42"/>
-  </g>
-  <g fill="#1F1030" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">
-    <text x="92" y="40" font-size="22" font-weight="700" letter-spacing="0.5">Mortgage</text>
-    <text x="92" y="64" font-size="18" font-weight="500" fill="#4A1766">Oasis</text>
-  </g>
+  <rect x="0" y="0" width="80" height="80" rx="16" fill="url(#brand)"/>
+  <path d="M40 68 L40 42" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" fill="none"/>
+  <path d="M40 44 C 28 36, 18 34, 10 30 C 20 25, 32 28, 40 38" fill="#FFFFFF" opacity="0.95"/>
+  <path d="M40 44 C 52 36, 62 34, 70 30 C 60 25, 48 28, 40 38" fill="#FFFFFF" opacity="0.95"/>
+  <path d="M40 44 C 34 30, 34 20, 40 12 C 46 20, 46 30, 40 44" fill="#FFFFFF" opacity="0.95"/>
+  <rect x="30" y="56" width="20" height="14" rx="2" fill="#FFFFFF" opacity="0.85"/>
+  <path d="M27 57 L40 46 L53 57" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="0.85"/>
+  <rect x="37" y="62" width="6" height="8" rx="1" fill="url(#brand)"/>
 </svg>
