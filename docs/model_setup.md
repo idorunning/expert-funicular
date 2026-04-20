@@ -1,6 +1,6 @@
-# Installing a local model for BrokerLedger
+# Installing a local model for Mortgage Broker Affordability Assistant
 
-BrokerLedger does all categorisation on this machine via [Ollama](https://ollama.com). Nothing about your clients' bank statements is ever sent over the network — the app talks only to `http://127.0.0.1:11434`.
+The application does all categorisation on this machine via [Ollama](https://ollama.com). Nothing about your clients' bank statements is ever sent over the network — the app talks only to `http://127.0.0.1:11434`.
 
 ## 1. Install Ollama
 
@@ -28,9 +28,9 @@ ollama list
 
 You should see the model you pulled.
 
-## 4. Launch BrokerLedger
+## 4. Launch the application
 
-BrokerLedger's first-run wizard will check Ollama is reachable and tell you which model it picked. If the wizard says "not reachable", start Ollama (open a terminal and run `ollama serve` on Linux/macOS, or open the Ollama tray app on Windows) and retry.
+The first-run wizard will check Ollama is reachable and tell you which model it picked. If the wizard says "not reachable", start Ollama (open a terminal and run `ollama serve` on Linux/macOS, or open the Ollama tray app on Windows) and retry.
 
 ## Notes
 

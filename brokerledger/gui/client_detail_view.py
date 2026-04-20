@@ -1,7 +1,9 @@
 """Client detail view — import drop zone + affordability summary + actions."""
 from __future__ import annotations
 
-from datetime import date
+import json
+import shutil
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -34,8 +36,10 @@ from PySide6.QtWidgets import (
 from sqlalchemy import func, select
 
 from ..affordability.calculator import compute_for_client
+from ..auth.session import get_current
+from ..clients.service import ClientError, count_flagged_transactions, get_client, verify_statement
 from ..db.engine import session_scope
-from ..db.models import Transaction
+from ..db.models import AuditLog, Statement, Transaction, User
 from ..categorize.taxonomy import (
     COMMITTED_CATEGORIES,
     DISCRETIONARY_CATEGORIES,
@@ -165,10 +169,151 @@ class ClientDetailView(QWidget):
         layout.addWidget(self.file_log)
         self._queue_items: dict[str, QListWidgetItem] = {}
 
+        layout.addWidget(self._build_statements_panel())
         layout.addWidget(self._build_affordability_panel())
         layout.addStretch(1)
 
         self.refresh()
+        self._refresh_statements_table()
+
+    def _build_statements_panel(self) -> QGroupBox:
+        group = QGroupBox("Statements")
+        outer = QVBoxLayout(group)
+        outer.setContentsMargins(12, 18, 12, 12)
+        outer.setSpacing(8)
+
+        hint = QLabel(
+            "Each statement can be marked as verified once all flagged transactions "
+            "have been reviewed."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #6B6679;")
+        outer.addWidget(hint)
+
+        self.statements_table = QTableWidget()
+        self.statements_table.setColumnCount(6)
+        self.statements_table.setHorizontalHeaderLabels(
+            ["Imported", "File", "Rows", "Flagged", "Status", ""]
+        )
+        header = self.statements_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.statements_table.verticalHeader().setVisible(False)
+        self.statements_table.setAlternatingRowColors(True)
+        self.statements_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.statements_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.statements_table.setMinimumHeight(120)
+        outer.addWidget(self.statements_table)
+
+        self.statements_empty = QLabel(
+            "<i>No statements imported yet. Drop a file above to begin.</i>"
+        )
+        self.statements_empty.setStyleSheet("color: #6B6679;")
+        self.statements_empty.setVisible(False)
+        outer.addWidget(self.statements_empty)
+
+        return group
+
+    def _load_statements(self) -> list[dict]:
+        with session_scope() as s:
+            stmts = s.execute(
+                select(Statement)
+                .where(Statement.client_id == self.client_id)
+                .order_by(Statement.imported_at.desc())
+            ).scalars().all()
+            rows: list[dict] = []
+            for st in stmts:
+                flagged = int(
+                    s.execute(
+                        select(func.count()).select_from(Transaction).where(
+                            Transaction.statement_id == st.id,
+                            Transaction.needs_review == 1,
+                        )
+                    ).scalar_one()
+                )
+                verifier_name: str | None = None
+                if st.verified_by is not None:
+                    u = s.get(User, st.verified_by)
+                    verifier_name = u.username if u else None
+                rows.append({
+                    "id": st.id,
+                    "imported_at": st.imported_at,
+                    "original_name": st.original_name,
+                    "row_count": st.row_count,
+                    "flagged": flagged,
+                    "verified_at": st.verified_at,
+                    "verified_by_username": verifier_name,
+                })
+            return rows
+
+    def _refresh_statements_table(self) -> None:
+        rows = self._load_statements()
+        self.statements_table.setRowCount(len(rows))
+        self.statements_empty.setVisible(not rows)
+        self.statements_table.setVisible(bool(rows))
+        for idx, row in enumerate(rows):
+            imported = row["imported_at"]
+            imported_text = imported.strftime("%Y-%m-%d %H:%M") if imported else "—"
+            name_item = QTableWidgetItem(row["original_name"])
+            name_item.setToolTip(row["original_name"])
+            rows_text = str(row["row_count"]) if row["row_count"] is not None else "—"
+            flagged = row["flagged"]
+            flagged_item = QTableWidgetItem(str(flagged))
+            flagged_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            if flagged:
+                flagged_item.setForeground(QBrush(QColor("#A52D1E")))
+
+            if row["verified_at"] is not None:
+                stamp = row["verified_at"].strftime("%Y-%m-%d %H:%M")
+                who = row["verified_by_username"] or "—"
+                status_item = QTableWidgetItem(f"✓ Verified {stamp} · {who}")
+                status_item.setForeground(QBrush(QColor(SUCCESS)))
+            elif flagged > 0:
+                status_item = QTableWidgetItem("Review needed")
+                status_item.setForeground(QBrush(QColor("#A52D1E")))
+            else:
+                status_item = QTableWidgetItem("Ready to verify")
+                status_item.setForeground(QBrush(QColor("#6B6679")))
+
+            self.statements_table.setItem(idx, 0, QTableWidgetItem(imported_text))
+            self.statements_table.setItem(idx, 1, name_item)
+            rc_item = QTableWidgetItem(rows_text)
+            rc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.statements_table.setItem(idx, 2, rc_item)
+            self.statements_table.setItem(idx, 3, flagged_item)
+            self.statements_table.setItem(idx, 4, status_item)
+
+            if row["verified_at"] is None:
+                verify_btn = QPushButton("Verify ✓")
+                verify_btn.setEnabled(flagged == 0)
+                if flagged > 0:
+                    verify_btn.setToolTip(
+                        f"{flagged} transaction(s) still need review before you can verify."
+                    )
+                else:
+                    verify_btn.setToolTip("Mark this statement as reviewed and complete.")
+                verify_btn.clicked.connect(
+                    lambda _checked=False, sid=row["id"]: self._on_verify_statement(sid)
+                )
+                self.statements_table.setCellWidget(idx, 5, verify_btn)
+            else:
+                self.statements_table.setCellWidget(idx, 5, QLabel(""))
+
+    def _on_verify_statement(self, statement_id: int) -> None:
+        try:
+            verify_statement(statement_id)
+        except ClientError as e:
+            QMessageBox.warning(self, "Cannot verify yet", str(e))
+            self._refresh_statements_table()
+            return
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Verify failed", str(e))
+            return
+        self._refresh_statements_table()
 
     def _build_affordability_panel(self) -> QGroupBox:
         group = QGroupBox("Affordability summary")
@@ -239,7 +384,7 @@ class ClientDetailView(QWidget):
         outer.addLayout(grid)
 
         breakdown_label = QLabel("<b>Category breakdown</b>  "
-                                 "<span style='color:#6B6679'>— updates live as the AI processes transactions</span>")
+                                 "<span style='color:#6B6679'>— updates as categories are assigned</span>")
         outer.addWidget(breakdown_label)
 
         self.category_table = QTableWidget()
@@ -267,9 +412,9 @@ class ClientDetailView(QWidget):
         recalculate_btn.setToolTip("Recalculate affordability from current transaction categories")
         recalculate_btn.clicked.connect(self.refresh)
         buttons.addWidget(recalculate_btn)
-        self.recategorize_btn = QPushButton("Re-categorise transactions")
+        self.recategorize_btn = QPushButton("Re-run category assignment")
         self.recategorize_btn.setToolTip(
-            "Re-run AI categorisation on all transactions (skips human corrections)"
+            "Re-assign categories to all transactions (keeps your manual fixes)"
         )
         self.recategorize_btn.clicked.connect(self._start_recategorize)
         buttons.addWidget(self.recategorize_btn)
@@ -357,6 +502,8 @@ class ClientDetailView(QWidget):
         self.l_monthly_net.setText(f"£{report.monthly_net_disposable:,.2f}")
         if not self._live_mode:
             self._populate_breakdown_from_report(report)
+        if hasattr(self, "statements_table"):
+            self._refresh_statements_table()
 
     def _populate_breakdown_from_report(self, report) -> None:
         for cat, row in self._category_rows.items():
@@ -608,6 +755,7 @@ class ClientDetailView(QWidget):
             if fail == 0
             else f"{ok} imported, {fail} failed — review totals below"
         )
+        self._refresh_statements_table()
         if ok > 0:
             self._maybe_emit_flagged()
 
@@ -702,6 +850,7 @@ class ClientDetailView(QWidget):
         if not path:
             return
         suffix = Path(path).suffix.lower()
+        export_kind = "xlsx"
         if chosen == csv_filter or suffix == ".csv":
             out_path = Path(path)
             if out_path.suffix.lower() != ".csv":
@@ -711,6 +860,7 @@ class ClientDetailView(QWidget):
             except Exception as e:  # noqa: BLE001
                 QMessageBox.critical(self, "Export failed", str(e))
                 return
+            export_kind = "csv"
         elif chosen == tsv_filter or suffix in {".tsv", ".txt"}:
             out_path = Path(path)
             if out_path.suffix.lower() not in {".tsv", ".txt"}:
@@ -720,6 +870,7 @@ class ClientDetailView(QWidget):
             except Exception as e:  # noqa: BLE001
                 QMessageBox.critical(self, "Export failed", str(e))
                 return
+            export_kind = "tsv"
         else:
             out_path = Path(path)
             if out_path.suffix.lower() != ".xlsx":
@@ -731,4 +882,68 @@ class ClientDetailView(QWidget):
             except Exception as e:  # noqa: BLE001
                 QMessageBox.critical(self, "Export failed", str(e))
                 return
-        QMessageBox.information(self, "Export complete", f"Saved to:\n{out}")
+            export_kind = "xlsx"
+
+        auto_copy = self._auto_save_copy(out, export_kind)
+        self._record_export_audit(out, auto_copy, export_kind)
+
+        message = f"Saved to:\n{out}"
+        if auto_copy is not None:
+            message += f"\n\nA copy was also filed under this client:\n{auto_copy}"
+        QMessageBox.information(self, "Export complete", message)
+
+    def _auto_save_copy(self, primary: Path, export_kind: str) -> Path | None:
+        """Drop a dated duplicate into ``{client_folder}/exports/``.
+
+        Returns the copied path, or ``None`` if the client folder is missing
+        (the save dialog already succeeded, so we keep the UI happy even if
+        auto-filing can't be performed).
+        """
+        try:
+            client = get_client(self.client_id)
+        except ClientError:
+            return None
+        folder = Path(client.folder_path)
+        exports = folder / "exports"
+        try:
+            exports.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        stamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        suffix = primary.suffix or f".{export_kind}"
+        target = exports / f"{stamp}-transactions{suffix}"
+        try:
+            shutil.copy2(primary, target)
+        except OSError:
+            return None
+        return target
+
+    def _record_export_audit(
+        self,
+        primary: Path,
+        auto_copy: Path | None,
+        export_kind: str,
+    ) -> None:
+        cu = get_current()
+        if cu is None:
+            return
+        detail = {
+            "client_id": self.client_id,
+            "format": export_kind,
+            "path": str(primary),
+        }
+        if auto_copy is not None:
+            detail["auto_copy_path"] = str(auto_copy)
+        try:
+            with session_scope() as s:
+                s.add(AuditLog(
+                    user_id=cu.id,
+                    action="export_client",
+                    entity_type="client",
+                    entity_id=self.client_id,
+                    detail_json=json.dumps(detail),
+                ))
+                s.commit()
+        except Exception:  # noqa: BLE001
+            # Audit logging must never block the user's export.
+            return

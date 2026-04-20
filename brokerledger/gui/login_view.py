@@ -140,7 +140,7 @@ class _ForgotPasswordDialog(QDialog):
         layout.setSpacing(10)
 
         intro = QLabel(
-            "<p>BrokerLedger runs fully offline, so we can't email you a reset link. "
+            "<p>This application runs fully offline, so we can't email you a reset link. "
             "Submit a request and an administrator will set a new password for you "
             "and tell you what it is.</p>"
         )
@@ -193,7 +193,7 @@ class LoginView(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("BrokerLedger — Login")
+        self.setWindowTitle("Mortgage Broker Affordability Assistant")
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 24, 24, 24)

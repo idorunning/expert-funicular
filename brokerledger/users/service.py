@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from .. import paths
 from ..db.engine import session_scope
-from ..db.models import User
+from ..db.models import AuditLog, User
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,30 @@ def list_active_users(exclude_admins: bool = False) -> list[UserRow]:
         if exclude_admins:
             q = q.where(User.role != "admin")
         return [_row(u) for u in s.execute(q).scalars().all()]
+
+
+def list_audit_users() -> list[UserRow]:
+    """Every user who has ever written an audit_log row.
+
+    Used by the admin audit log viewer to populate its user filter dropdown.
+    Includes inactive and deleted-then-recreated accounts if they still exist.
+    """
+    with session_scope() as s:
+        q = (
+            select(User)
+            .where(User.id.in_(select(AuditLog.user_id).distinct()))
+            .order_by(User.username)
+        )
+        return [_row(u) for u in s.execute(q).scalars().all()]
+
+
+def list_audit_actions() -> list[str]:
+    """Distinct action strings present in audit_log, alphabetically sorted."""
+    with session_scope() as s:
+        rows = s.execute(
+            select(AuditLog.action).distinct().order_by(AuditLog.action.asc())
+        ).all()
+        return [r[0] for r in rows]
 
 
 def set_user_photo(user_id: int, source_path: Path) -> str:

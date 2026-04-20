@@ -9,7 +9,7 @@ description = "Fully-local mortgage affordability analyser for UK brokers"
 requires-python = ">=3.11"
 readme = "README.md"
 license = { text = "Proprietary" }
-authors = [{ name = "BrokerLedger" }]
+authors = [{ name = "Mortgage Oasis Ltd" }]
 dependencies = [
     "PySide6~=6.7",
     "SQLAlchemy~=2.0",

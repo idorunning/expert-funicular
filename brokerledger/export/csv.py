@@ -12,7 +12,7 @@ from ..db.models import Transaction
 
 COLUMNS = [
     "Date", "Description", "Merchant", "Amount (GBP)", "Direction",
-    "Category", "Group", "Confidence", "Source", "Needs Review",
+    "Category", "Group", "Certainty", "Method", "Flagged",
 ]
 
 

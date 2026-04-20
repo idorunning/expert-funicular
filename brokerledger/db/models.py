@@ -94,6 +94,8 @@ class Statement(Base):
     imported_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow)
     page_count: Mapped[int | None] = mapped_column(Integer)
     row_count: Mapped[int | None] = mapped_column(Integer)
+    verified_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    verified_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
     client: Mapped[Client] = relationship(back_populates="statements")
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="statement", cascade="all, delete-orphan")

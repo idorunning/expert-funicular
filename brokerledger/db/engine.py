@@ -39,6 +39,8 @@ def init_engine(db_file: Path | None = None, echo: bool = False) -> Engine:
     Base.metadata.create_all(_engine)
     _ensure_user_photo_column(_engine)
     _ensure_password_reset_code_columns(_engine)
+    _ensure_statement_verified_columns(_engine)
+    _ensure_audit_log_indexes(_engine)
     return _engine
 
 
@@ -72,6 +74,30 @@ def _ensure_password_reset_code_columns(engine: Engine) -> None:
             c.exec_driver_sql(
                 "ALTER TABLE password_reset_requests ADD COLUMN code_expires_at DATETIME"
             )
+
+
+def _ensure_statement_verified_columns(engine: Engine) -> None:
+    """Add broker sign-off columns to pre-existing statements tables."""
+    with engine.begin() as c:
+        cols = {
+            row[1]
+            for row in c.exec_driver_sql("PRAGMA table_info(statements)").fetchall()
+        }
+        if "verified_at" not in cols:
+            c.exec_driver_sql("ALTER TABLE statements ADD COLUMN verified_at DATETIME")
+        if "verified_by" not in cols:
+            c.exec_driver_sql("ALTER TABLE statements ADD COLUMN verified_by INTEGER")
+
+
+def _ensure_audit_log_indexes(engine: Engine) -> None:
+    """Create helpful indexes on audit_log for the admin viewer."""
+    with engine.begin() as c:
+        c.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_audit_user_at ON audit_log (user_id, at)"
+        )
+        c.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_audit_action ON audit_log (action)"
+        )
 
 
 def get_engine() -> Engine:

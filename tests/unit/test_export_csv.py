@@ -53,9 +53,9 @@ def test_export_transactions_csv_round_trip(logged_in_admin, tmp_path: Path):
     assert council["Direction"] == "debit"
     # Debits are stored as signed negatives; the CSV writes the raw value.
     assert council["Amount (GBP)"] == "-180.00"
-    # Seeded rule → source=='rule' with high confidence, not flagged.
-    assert council["Source"] == "rule"
-    assert council["Needs Review"] == ""
+    # Seeded rule → method=='rule' with high confidence, not flagged.
+    assert council["Method"] == "rule"
+    assert council["Flagged"] == ""
 
 
 def test_export_transactions_tsv_uses_tabs(logged_in_admin, tmp_path: Path):

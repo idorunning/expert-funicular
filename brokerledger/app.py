@@ -1,4 +1,4 @@
-"""QApplication bootstrap for BrokerLedger."""
+"""QApplication bootstrap for Mortgage Broker Affordability Assistant."""
 from __future__ import annotations
 
 import sys
@@ -20,7 +20,7 @@ def run() -> int:
     configure_logging()
     init_engine()
     run_all_seeds()
-    logger.info("BrokerLedger starting — data at {}", paths.app_data_dir())
+    logger.info("Mortgage Broker Affordability Assistant starting — data at {}", paths.app_data_dir())
 
     app = QApplication.instance() or QApplication(sys.argv)
     apply_theme(app)

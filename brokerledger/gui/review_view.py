@@ -33,8 +33,8 @@ COLUMNS = [
     ("Amount (GBP)", 100),
     ("Category", 200),
     ("Group", 110),
-    ("Confidence", 110),
-    ("Needs review", 90),
+    ("Certainty", 110),
+    ("Flagged", 90),
 ]
 
 
@@ -285,7 +285,7 @@ class ReviewView(QWidget):
             noun = "transaction" if flagged_count == 1 else "transactions"
             self.flagged_banner.setText(
                 f"⚑ {flagged_count} {noun} need your review. "
-                "Everything else was auto-categorised with high confidence."
+                "Everything else was assigned automatically with high certainty."
             )
             self.flagged_banner.setVisible(True)
 

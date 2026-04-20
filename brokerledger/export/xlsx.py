@@ -45,7 +45,7 @@ def _transactions_sheet(wb: Workbook, client_id: int) -> None:
     ws = wb.create_sheet("Transactions")
     headers = [
         "Date", "Description", "Merchant", "Amount (GBP)", "Direction",
-        "Category", "Group", "Confidence", "Source", "Needs Review",
+        "Category", "Group", "Certainty", "Method", "Flagged",
     ]
     _write_header(ws, headers)
     with session_scope() as s:
@@ -127,18 +127,48 @@ def _audit_sheet(wb: Workbook, client: Client, user_label: str) -> None:
     ws.append(["Exported by", user_label])
     ws.append(["Exported at", datetime.now(timezone.utc).isoformat()])
     ws.append([])
-    ws.append(["Source statements (SHA-256):"])
-    ws["A6"].font = _BOLD
+    headers = [
+        "File",
+        "SHA-256",
+        "Kind",
+        "Imported at",
+        "Verified by",
+        "Verified at",
+    ]
+    start_row = 6
+    for col, h in enumerate(headers, start=1):
+        cell = ws.cell(row=start_row, column=col, value=h)
+        cell.font = _BOLD
+        cell.fill = _HEADER_FILL
     with session_scope() as s:
         stmts = s.execute(
-            select(Statement).where(Statement.client_id == client.id).order_by(Statement.imported_at.asc())
+            select(Statement)
+            .where(Statement.client_id == client.id)
+            .order_by(Statement.imported_at.asc())
         ).scalars().all()
+        verifier_cache: dict[int, str] = {}
         for st in stmts:
-            ws.append([st.original_name, st.file_sha256, st.file_kind, st.imported_at.isoformat()])
+            verifier = ""
+            if st.verified_by is not None:
+                verifier = verifier_cache.get(st.verified_by) or ""
+                if not verifier:
+                    u = s.get(User, st.verified_by)
+                    verifier = u.username if u else f"user#{st.verified_by}"
+                    verifier_cache[st.verified_by] = verifier
+            ws.append([
+                st.original_name,
+                st.file_sha256,
+                st.file_kind,
+                st.imported_at.isoformat(),
+                verifier,
+                st.verified_at.isoformat() if st.verified_at else "",
+            ])
     ws.column_dimensions["A"].width = 40
     ws.column_dimensions["B"].width = 72
     ws.column_dimensions["C"].width = 12
     ws.column_dimensions["D"].width = 26
+    ws.column_dimensions["E"].width = 20
+    ws.column_dimensions["F"].width = 26
 
 
 def export_client_workbook(client_id: int, out_path: Path,

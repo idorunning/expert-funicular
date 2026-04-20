@@ -12,7 +12,7 @@ from ..config import get_settings
 from ..db.engine import session_scope
 from ..db.models import AuditLog, User, utcnow
 from .hashing import hash_password, needs_rehash, verify_password
-from .session import CurrentUser, set_current
+from .session import CurrentUser, get_current, set_current
 
 ROLES = ("admin", "broker")
 
@@ -249,4 +249,14 @@ def login(identifier: str, password: str) -> CurrentUser:
 
 
 def logout() -> None:
+    user = get_current()
+    if user is not None:
+        with session_scope() as s:
+            s.add(AuditLog(
+                user_id=user.id,
+                action="logout",
+                entity_type="user",
+                entity_id=user.id,
+            ))
+            s.commit()
     set_current(None)

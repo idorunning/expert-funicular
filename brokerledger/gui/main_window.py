@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from ..auth.service import logout
 from ..auth.session import get_current
 from .admin_users_view import AdminUsersView
+from .audit_log_view import AuditLogView
 from .client_detail_view import ClientDetailView
 from .clients_view import ClientsView
 from .login_view import LoginView
@@ -44,7 +45,7 @@ class _BrandHeader(QFrame):
 
         text_col = QVBoxLayout()
         text_col.setSpacing(0)
-        title = QLabel("BrokerLedger")
+        title = QLabel("Mortgage Broker Affordability Assistant")
         title.setObjectName("BrandTitle")
         subtitle = QLabel("Mortgage affordability, fully local")
         subtitle.setObjectName("BrandSubtitle")
@@ -78,7 +79,7 @@ class _BrandHeader(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("BrokerLedger — Mortgage Oasis")
+        self.setWindowTitle("Mortgage Broker Affordability Assistant")
         self.resize(1280, 820)
         self.setMinimumSize(1024, 640)
 
@@ -99,19 +100,23 @@ class MainWindow(QMainWindow):
         self.clients = ClientsView()
         self.admin = AdminUsersView()
         self.settings = SettingsView()
+        self.audit_log = AuditLogView()
 
-        self.stack.addWidget(self.login)    # 0
-        self.stack.addWidget(self.clients)  # 1
-        self.stack.addWidget(self.admin)    # 2
-        self.stack.addWidget(self.settings) # 3
+        self.stack.addWidget(self.login)      # 0
+        self.stack.addWidget(self.clients)    # 1
+        self.stack.addWidget(self.admin)      # 2
+        self.stack.addWidget(self.settings)   # 3
+        self.stack.addWidget(self.audit_log)  # 4
 
         self.login.logged_in.connect(self._on_logged_in)
         self.clients.logout_requested.connect(self._on_logout)
         self.clients.admin_requested.connect(self._open_admin)
         self.clients.settings_requested.connect(self._open_settings)
+        self.clients.audit_log_requested.connect(self._open_audit_log)
         self.clients.open_client.connect(self._open_client_detail)
         self.admin.back_requested.connect(self._show_clients)
         self.settings.back_requested.connect(self._show_clients)
+        self.audit_log.back_requested.connect(self._show_clients)
         self.settings.profile_changed.connect(self.header.refresh_user)
 
         # Cache detail views per client so their worker threads survive
@@ -152,6 +157,17 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         self.settings.refresh()
         self.stack.setCurrentWidget(self.settings)
+
+    def _open_audit_log(self) -> None:
+        try:
+            self.audit_log.refresh()
+        except PermissionError:
+            QMessageBox.warning(
+                self, "Admins only",
+                "Only administrators can view the audit log.",
+            )
+            return
+        self.stack.setCurrentWidget(self.audit_log)
 
     def _show_clients(self) -> None:
         self.clients.refresh()

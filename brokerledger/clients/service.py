@@ -7,13 +7,21 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from .. import paths
 from ..auth.session import require_admin, require_login
 from ..db.engine import session_scope
-from ..db.models import AuditLog, Client, User, utcnow
+from ..db.models import AuditLog, Client, Statement, Transaction, User, utcnow
+
+
+@dataclass(frozen=True)
+class StatementVerification:
+    statement_id: int
+    verified_at: datetime
+    verified_by: int
+    verified_by_username: str | None
 
 
 @dataclass(frozen=True)
@@ -153,6 +161,66 @@ def delete_client(client_id: int) -> None:
             detail_json=json.dumps({"display_name": display_name}),
         ))
         s.commit()
+
+
+def count_flagged_transactions(statement_id: int) -> int:
+    """Number of transactions on the statement still marked for review."""
+    with session_scope() as s:
+        return int(
+            s.execute(
+                select(func.count())
+                .select_from(Transaction)
+                .where(
+                    Transaction.statement_id == statement_id,
+                    Transaction.needs_review == 1,
+                )
+            ).scalar_one()
+        )
+
+
+def verify_statement(statement_id: int) -> StatementVerification:
+    """Stamp a statement as reviewed by the current broker.
+
+    Blocks if any transactions on the statement are still flagged for review.
+    Idempotent on re-verify: timestamp is refreshed, a new audit row is added.
+    """
+    user = require_login()
+    with session_scope() as s:
+        stmt = s.get(Statement, statement_id)
+        if stmt is None:
+            raise ClientError("Statement not found")
+        flagged = int(
+            s.execute(
+                select(func.count())
+                .select_from(Transaction)
+                .where(
+                    Transaction.statement_id == statement_id,
+                    Transaction.needs_review == 1,
+                )
+            ).scalar_one()
+        )
+        if flagged:
+            raise ClientError(
+                f"{flagged} transaction(s) still need review before you can verify."
+            )
+        now = utcnow()
+        stmt.verified_at = now
+        stmt.verified_by = user.id
+        s.add(AuditLog(
+            user_id=user.id,
+            action="verify_statement",
+            entity_type="statement",
+            entity_id=statement_id,
+            detail_json=json.dumps({"client_id": stmt.client_id}),
+        ))
+        s.commit()
+        verifier = s.get(User, user.id)
+        return StatementVerification(
+            statement_id=statement_id,
+            verified_at=now,
+            verified_by=user.id,
+            verified_by_username=verifier.username if verifier else None,
+        )
 
 
 def reassign_client(client_id: int, new_user_id: int) -> ClientRecord:

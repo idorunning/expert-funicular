@@ -1,27 +1,34 @@
-"""First-run dialog: create admin user, probe Ollama."""
+"""First-run dialog: create admin user, probe Ollama, accept legal terms."""
 from __future__ import annotations
+
+from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QVBoxLayout,
 )
 
 from ..auth.service import AuthError, create_user, login
 from ..categorize.llm_client import LLMError, OllamaClient
 from ..config import get_settings
+from ..db import app_settings
+from .dialogs.legal_dialog import LegalDialog
 from .theme import load_logo_pixmap
 
 
 class FirstRunDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Welcome to BrokerLedger")
+        self.setWindowTitle("Welcome to Mortgage Broker Affordability Assistant")
         self.setMinimumWidth(480)
 
         layout = QVBoxLayout(self)
@@ -36,7 +43,7 @@ class FirstRunDialog(QDialog):
         intro = QLabel(
             "<h2>Welcome</h2>"
             "<p>Create an administrator account. You'll use this to log in and to add more users later.</p>"
-            "<p>BrokerLedger runs entirely on this machine. Nothing is sent over the network except to your "
+            "<p>This application runs entirely on this machine. Nothing is sent over the network except to your "
             "local Ollama instance at 127.0.0.1.</p>"
         )
         intro.setWordWrap(True)
@@ -67,12 +74,28 @@ class FirstRunDialog(QDialog):
         self.ollama_status.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(self.ollama_status)
 
+        legal_row = QHBoxLayout()
+        legal_row.setContentsMargins(0, 8, 0, 0)
+        self.accept_legal = QCheckBox(
+            "I have read and accept the Privacy Policy and End-User Licence Agreement."
+        )
+        legal_row.addWidget(self.accept_legal, 1)
+        view_legal_btn = QPushButton("View…")
+        view_legal_btn.setFlat(True)
+        view_legal_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        view_legal_btn.clicked.connect(self._open_legal)
+        legal_row.addWidget(view_legal_btn)
+        layout.addLayout(legal_row)
+
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self._on_ok)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
 
         self._probe_ollama()
+
+    def _open_legal(self) -> None:
+        LegalDialog(self).exec()
 
     def _probe_ollama(self) -> None:
         s = get_settings()
@@ -102,6 +125,13 @@ class FirstRunDialog(QDialog):
         )
 
     def _on_ok(self) -> None:
+        if not self.accept_legal.isChecked():
+            QMessageBox.warning(
+                self, "Legal acceptance required",
+                "You must accept the Privacy Policy and End-User Licence "
+                "Agreement to continue."
+            )
+            return
         if self.password.text() != self.password2.text():
             QMessageBox.warning(self, "Passwords don't match", "Please re-enter the password.")
             return
@@ -117,4 +147,8 @@ class FirstRunDialog(QDialog):
         except AuthError as e:
             QMessageBox.warning(self, "Could not create admin", str(e))
             return
+        app_settings.put(
+            "legal_accepted_at",
+            datetime.now(timezone.utc).isoformat(),
+        )
         self.accept()

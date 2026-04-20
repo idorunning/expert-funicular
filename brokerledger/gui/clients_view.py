@@ -89,6 +89,7 @@ class ClientsView(QWidget):
     logout_requested = Signal()
     admin_requested = Signal()
     settings_requested = Signal()
+    audit_log_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -113,6 +114,9 @@ class ClientsView(QWidget):
         self.admin_btn = QPushButton("Admin…")
         self.admin_btn.clicked.connect(self.admin_requested.emit)
         header.addWidget(self.admin_btn)
+        self.audit_log_btn = QPushButton("Audit log…")
+        self.audit_log_btn.clicked.connect(self.audit_log_requested.emit)
+        header.addWidget(self.audit_log_btn)
         logout = QPushButton("Log out")
         logout.clicked.connect(self.logout_requested.emit)
         header.addWidget(logout)
@@ -162,6 +166,7 @@ class ClientsView(QWidget):
             label = cu.full_name or cu.username
             self.user_label.setText(f"<span style='color:#555'>Signed in as <b>{label}</b> ({cu.role})</span>")
             self.admin_btn.setVisible(cu.role == "admin")
+            self.audit_log_btn.setVisible(cu.role == "admin")
         try:
             self._records = list_clients(include_archived=self.show_archived.isChecked())
         except Exception as e:  # noqa: BLE001

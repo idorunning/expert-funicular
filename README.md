@@ -1,6 +1,8 @@
-# BrokerLedger
+# Mortgage Broker Affordability Assistant
 
 A fully-local desktop app for UK mortgage brokers. Ingests client bank statements (PDF / CSV / XLSX), uses a local LLM to categorise every transaction against the mortgage-affordability taxonomy, lets the broker correct any mistakes, totals each category, and exports an affordability spreadsheet. Nothing ever leaves the machine.
+
+Published by Mortgage Oasis Ltd — [www.mortgage-oasis.com](https://www.mortgage-oasis.com).
 
 ## Privacy
 

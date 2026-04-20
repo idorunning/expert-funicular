@@ -1,6 +1,6 @@
 """SMTP helpers for outbound password-reset and test emails.
 
-BrokerLedger is otherwise fully offline; the unit test
+The application is otherwise fully offline; the unit test
 ``tests/unit/test_llm_client_local_only.py`` asserts all httpx traffic goes to
 ``127.0.0.1``. The SMTP path is a narrowly-scoped exception — it is only
 activated when an admin has explicitly filled in SMTP settings.
@@ -59,13 +59,13 @@ def send_reset_code(to_addr: str, code: str) -> None:
     if cfg is None:
         raise RuntimeError("SMTP is not configured")
     msg = EmailMessage()
-    msg["Subject"] = "BrokerLedger password reset code"
+    msg["Subject"] = "Mortgage Broker Affordability Assistant — password reset code"
     msg["From"] = cfg.from_addr
     msg["To"] = to_addr
     msg.set_content(
         "Hello,\n\n"
-        "You asked to reset your BrokerLedger password. Enter this code in "
-        "the app to choose a new password:\n\n"
+        "You asked to reset your Mortgage Broker Affordability Assistant "
+        "password. Enter this code in the app to choose a new password:\n\n"
         f"    {code}\n\n"
         "This code expires in 15 minutes.\n\n"
         "If you did not ask for a reset, you can ignore this message."
@@ -78,11 +78,11 @@ def send_test_email(to_addr: str) -> None:
     if cfg is None:
         raise RuntimeError("SMTP is not configured")
     msg = EmailMessage()
-    msg["Subject"] = "BrokerLedger test email"
+    msg["Subject"] = "Mortgage Broker Affordability Assistant — test email"
     msg["From"] = cfg.from_addr
     msg["To"] = to_addr
     msg.set_content(
-        "This is a BrokerLedger test email. If you can read it, your SMTP "
-        "settings are working."
+        "This is a test email from the Mortgage Broker Affordability Assistant. "
+        "If you can read it, your SMTP settings are working."
     )
     _send(cfg, msg)
