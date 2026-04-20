@@ -50,6 +50,9 @@ from .widgets.avatar import AvatarLabel
 class _UserDialog(QDialog):
     """Shared create/edit dialog. Pass ``existing=`` to edit."""
 
+    _ERR_STYLE = "QLineEdit { border: 2px solid #A52D1E; background: #FFF5F3; }"
+    _OK_STYLE  = ""
+
     def __init__(self, parent=None, *, existing: User | None = None) -> None:
         super().__init__(parent)
         self.setMinimumWidth(420)
@@ -57,7 +60,7 @@ class _UserDialog(QDialog):
         self._existing = existing
 
         form = QFormLayout(self)
-        form.setSpacing(10)
+        form.setSpacing(6)
         form.setContentsMargins(16, 16, 16, 16)
 
         self.full_name = QLineEdit()
@@ -76,11 +79,25 @@ class _UserDialog(QDialog):
             self.role.setCurrentText(existing.role)
             self.password.setPlaceholderText("Leave blank to keep current password")
 
+        # Inline error labels — hidden until validation fires.
+        self._err_username = QLabel("")
+        self._err_username.setStyleSheet("color:#A52D1E;font-size:11px;")
+        self._err_username.setVisible(False)
+        self._err_password = QLabel("")
+        self._err_password.setStyleSheet("color:#A52D1E;font-size:11px;")
+        self._err_password.setVisible(False)
+
+        # Clear error styling when the user edits the field.
+        self.username.textChanged.connect(lambda: self._clear_err(self.username, self._err_username))
+        self.password.textChanged.connect(lambda: self._clear_err(self.password, self._err_password))
+
         form.addRow("Full name", self.full_name)
         form.addRow("Email (used to log in)", self.email)
         form.addRow("Username", self.username)
+        form.addRow("", self._err_username)
         form.addRow("Role", self.role)
         form.addRow("Password", self.password)
+        form.addRow("", self._err_password)
 
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -88,6 +105,46 @@ class _UserDialog(QDialog):
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         form.addRow(btns)
+
+    # ------------------------------------------------------------------
+    # Validation helpers
+    # ------------------------------------------------------------------
+
+    def _field_error(self, field: QLineEdit, label: QLabel, message: str) -> None:
+        field.setStyleSheet(self._ERR_STYLE)
+        label.setText(message)
+        label.setVisible(True)
+        field.setFocus()
+
+    def _clear_err(self, field: QLineEdit, label: QLabel) -> None:
+        field.setStyleSheet(self._OK_STYLE)
+        label.setVisible(False)
+
+    def accept(self) -> None:  # noqa: A003
+        from ..config import get_settings
+        username = self.username.text().strip()
+        pw = self.password.text()
+
+        if not username:
+            self._field_error(self.username, self._err_username, "Username is required.")
+            return
+
+        is_new = self._existing is None
+        if is_new and not pw:
+            self._field_error(self.password, self._err_password, "Password is required for new users.")
+            return
+
+        if pw:  # only validate when a password was actually entered
+            min_len = get_settings().password_min_length
+            if len(pw) < min_len:
+                self._field_error(
+                    self.password, self._err_password,
+                    f"Password must be at least {min_len} characters — please try again.",
+                )
+                self.password.clear()
+                return
+
+        super().accept()
 
     def values(self) -> dict[str, str]:
         return {
@@ -296,24 +353,31 @@ class AdminUsersView(QWidget):
 
     def _new_user(self) -> None:
         dlg = _UserDialog(self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        v = dlg.values()
-        if not v["password"]:
-            QMessageBox.warning(self, "Missing password", "New users need a password.")
-            return
-        try:
-            actor = require_admin()
-            create_user(
-                v["username"], v["password"],
-                role=v["role"],
-                full_name=v["full_name"] or None,
-                email=v["email"] or None,
-                actor_id=actor.id,
-            )
-        except AuthError as e:
-            QMessageBox.warning(self, "Could not create user", str(e))
-            return
+        while True:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            v = dlg.values()
+            try:
+                actor = require_admin()
+                create_user(
+                    v["username"], v["password"],
+                    role=v["role"],
+                    full_name=v["full_name"] or None,
+                    email=v["email"] or None,
+                    actor_id=actor.id,
+                )
+                break
+            except AuthError as e:
+                err = str(e)
+                low = err.lower()
+                if "username" in low or "already" in low or "taken" in low:
+                    dlg._field_error(dlg.username, dlg._err_username, err)
+                elif "password" in low:
+                    dlg._field_error(dlg.password, dlg._err_password, err)
+                    dlg.password.clear()
+                else:
+                    QMessageBox.warning(self, "Could not create user", err)
+                    return
         self.refresh()
 
     def _edit_selected(self) -> None:

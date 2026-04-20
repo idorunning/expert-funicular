@@ -68,17 +68,20 @@ def _decide(
     llm: LLMClient,
 ) -> Decision:
     settings = get_settings()
-    flags_list = detect_flags(description_raw, merchant)
     is_credit = direction == "credit"
+    flags_list = detect_flags(description_raw, merchant, direction=direction)
 
     # 0. Flag-based smart default — gambling and fast payments get a
-    # pre-filled category suggestion but always land in Review so the broker
-    # can confirm or override. Normal pipeline is skipped for these rows.
-    if flags_list:
-        smart = smart_default_category(flags_list, is_credit=is_credit)
+    # pre-filled category suggestion and always land in Review. The normal
+    # pipeline is skipped for these risk flags.
+    # FLAG_INBOUND is purely cosmetic — it marks the chip in Review but does
+    # NOT shortcut the pipeline; credits still get a proper category.
+    risk_flags = [f for f in flags_list if f != "inbound"]
+    if risk_flags:
+        smart = smart_default_category(risk_flags, is_credit=is_credit)
         category = smart or ""
         group = group_of(category) if category else GROUP_DISCRETIONARY
-        flag_names = ", ".join(flags_list)
+        flag_names = ", ".join(risk_flags)
         return Decision(
             category=category,
             group=group,
@@ -240,7 +243,7 @@ def categorize_statement(
             tx.confidence = decision.confidence
             tx.source = decision.source
             tx.reason = decision.reason
-            tx.flags = serialize_flags(detect_flags(tx.description_raw, tx.merchant_normalized))
+            tx.flags = serialize_flags(detect_flags(tx.description_raw, tx.merchant_normalized, direction=tx.direction or "debit"))
             tx.needs_review = 1 if decision.needs_review else 0
             tx.updated_at = utcnow()
             updated += 1
@@ -277,7 +280,7 @@ def recategorize_transaction(tx_id: int, *, llm: LLMClient | None = None) -> Dec
         tx.confidence = decision.confidence
         tx.source = decision.source
         tx.reason = decision.reason
-        tx.flags = serialize_flags(detect_flags(tx.description_raw, tx.merchant_normalized))
+        tx.flags = serialize_flags(detect_flags(tx.description_raw, tx.merchant_normalized, direction=tx.direction or "debit"))
         tx.needs_review = 1 if decision.needs_review else 0
         tx.updated_at = utcnow()
         s.commit()
@@ -334,7 +337,7 @@ def recategorize_client(
             tx.confidence = decision.confidence
             tx.source = decision.source
             tx.reason = decision.reason
-            tx.flags = serialize_flags(detect_flags(tx.description_raw, tx.merchant_normalized))
+            tx.flags = serialize_flags(detect_flags(tx.description_raw, tx.merchant_normalized, direction=tx.direction or "debit"))
             tx.needs_review = 1 if decision.needs_review else 0
             tx.updated_at = utcnow()
             updated += 1

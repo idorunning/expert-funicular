@@ -156,8 +156,11 @@ class TransactionsModel(QAbstractTableModel):
                 if tier in _TIER_BG:
                     return QBrush(_TIER_BG[tier])
             if col == COL_FLAGS and row["flags"]:
-                # Soft magenta wash for flagged rows.
-                return QBrush(QColor(239, 231, 245))
+                from brokerledger.categorize.flags import FLAG_INBOUND
+                only_inbound = row["flags"] == [FLAG_INBOUND]
+                if only_inbound:
+                    return QBrush(QColor(224, 242, 241))  # soft teal for inbound
+                return QBrush(QColor(239, 231, 245))       # soft purple for risk flags
             if row["needs_review"]:
                 return QBrush(QColor(255, 246, 225))
         if role == Qt.ItemDataRole.ForegroundRole:
@@ -166,7 +169,11 @@ class TransactionsModel(QAbstractTableModel):
                 if tier in _TIER_FG:
                     return QBrush(_TIER_FG[tier])
             if col == COL_FLAGS and row["flags"]:
-                return QBrush(QColor("#4A1766"))
+                from brokerledger.categorize.flags import FLAG_INBOUND
+                only_inbound = row["flags"] == [FLAG_INBOUND]
+                if only_inbound:
+                    return QBrush(QColor("#0B6E6E"))  # teal for inbound
+                return QBrush(QColor("#4A1766"))       # purple for risk flags
             if col == COL_FLAGGED and row["needs_review"]:
                 return QBrush(QColor(180, 90, 0))
         if role == Qt.ItemDataRole.FontRole:
@@ -410,6 +417,16 @@ class TransactionsModel(QAbstractTableModel):
             self._propagate_to_matching_merchant(row["merchant"], category)
         return updated
 
+    def disregard_rows(self, row_indices: list[int]) -> int:
+        """Mark selected transactions as professionally disregarded.
+
+        Sets category to ``Transfer/Excluded`` (excluded from affordability)
+        and source to ``'user'``, so the merchant rule is learned and future
+        imports from the same source auto-disregard. Returns count updated.
+        """
+        _DISREGARD_CAT = "Transfer/Excluded"
+        return self.bulk_apply_category(row_indices, _DISREGARD_CAT)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -527,6 +544,19 @@ class ReviewView(QWidget):
         self.apply_category_btn.setEnabled(False)
         self.apply_category_btn.clicked.connect(self._apply_category_to_selected)
         toolbar.addWidget(self.apply_category_btn)
+
+        # Disregard selected — marks rows as Transfer/Excluded (excluded from
+        # affordability). Commonly used for personal bank-to-bank transfers.
+        self.disregard_btn = QPushButton("⊘  Disregard selected")
+        self.disregard_btn.setToolTip(
+            "Professionally disregard the selected transactions — sets them to "
+            "'Transfer/Excluded' so they don't appear in affordability totals. "
+            "The system learns from this so future imports auto-disregard the "
+            "same source."
+        )
+        self.disregard_btn.setEnabled(False)
+        self.disregard_btn.clicked.connect(self._disregard_selected)
+        toolbar.addWidget(self.disregard_btn)
 
         # Confirm selected — marks the selected rows as user-confirmed without
         # changing their current category.
@@ -647,6 +677,16 @@ class ReviewView(QWidget):
         has = bool(self.table.selectionModel().selectedRows())
         self.confirm_btn.setEnabled(has)
         self.apply_category_btn.setEnabled(has)
+        self.disregard_btn.setEnabled(has)
+
+    def _disregard_selected(self) -> None:
+        indices = self.table.selectionModel().selectedRows()
+        if not indices:
+            return
+        row_nums = sorted({i.row() for i in indices})
+        updated = self.model.disregard_rows(row_nums)
+        if updated:
+            self.refresh_summary()
 
     def _apply_category_to_selected(self) -> None:
         indices = self.table.selectionModel().selectedRows()

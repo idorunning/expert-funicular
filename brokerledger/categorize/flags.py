@@ -1,4 +1,4 @@
-"""Transaction-level flags — Gambling and Fast Payments.
+"""Transaction-level flags — Gambling, Fast Payments, and Inbound.
 
 Flags are orthogonal to categories. A transaction can belong to any category
 and also carry one or more flags. Flags drive special treatment in the UI
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 FLAG_GAMBLING = "gambling"
 FLAG_FAST_PAYMENT = "fast_payment"
+FLAG_INBOUND = "inbound"   # any credit / money-in transaction
 
 # Keyword hits that mark a description as gambling. Lower-case substrings.
 _GAMBLING_KEYWORDS: tuple[str, ...] = (
@@ -44,8 +45,18 @@ SMART_DEFAULTS: dict[str, tuple[str | None, str | None]] = {
 }
 
 
-def detect_flags(description_raw: str, merchant_normalized: str) -> list[str]:
-    """Return flag strings for a transaction description."""
+def detect_flags(
+    description_raw: str,
+    merchant_normalized: str,
+    *,
+    direction: str = "debit",
+) -> list[str]:
+    """Return flag strings for a transaction.
+
+    ``direction`` should be ``'credit'`` or ``'debit'`` (default). All
+    credits automatically receive ``FLAG_INBOUND`` so the broker can
+    easily multi-select and disregard personal transfers.
+    """
     result: list[str] = []
     blob = f"{description_raw or ''} {merchant_normalized or ''}".lower()
 
@@ -63,6 +74,11 @@ def detect_flags(description_raw: str, merchant_normalized: str) -> list[str]:
             if kw in blob:
                 result.append(FLAG_FAST_PAYMENT)
                 break
+
+    # All credits get the inbound marker so brokers can spot and disregard
+    # personal bank-to-bank transfers in one bulk action.
+    if direction == "credit":
+        result.append(FLAG_INBOUND)
 
     return result
 
@@ -94,6 +110,7 @@ def smart_default_category(flags: list[str], is_credit: bool) -> str | None:
 FLAG_DISPLAY_NAMES: dict[str, str] = {
     FLAG_GAMBLING:     "Gambling",
     FLAG_FAST_PAYMENT: "Fast payment",
+    FLAG_INBOUND:      "Inbound",
 }
 
 

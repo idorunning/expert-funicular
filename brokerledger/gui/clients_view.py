@@ -42,19 +42,58 @@ from .greetings import greeting_for, random_quote
 
 
 class NewClientDialog(QDialog):
+    _ERR_STYLE = "QLineEdit { border: 2px solid #A52D1E; background: #FFF5F3; }"
+    _OK_STYLE  = ""
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setMinimumWidth(380)
         self.setWindowTitle("New client")
         form = QFormLayout(self)
+        form.setSpacing(6)
+
         self.name = QLineEdit()
         form.addRow("Client name", self.name)
+        self._err_name = QLabel("")
+        self._err_name.setStyleSheet("color:#A52D1E;font-size:11px;")
+        self._err_name.setVisible(False)
+        form.addRow("", self._err_name)
+
         self.reference = QLineEdit()
         self.reference.setPlaceholderText("optional, e.g. case number")
         form.addRow("Reference", self.reference)
+        self._err_ref = QLabel("")
+        self._err_ref.setStyleSheet("color:#A52D1E;font-size:11px;")
+        self._err_ref.setVisible(False)
+        form.addRow("", self._err_ref)
+
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         form.addRow(btns)
+
+        self.name.textChanged.connect(lambda: self._clear_err(self.name, self._err_name))
+        self.reference.textChanged.connect(lambda: self._clear_err(self.reference, self._err_ref))
+
+    def _field_error(self, field: QLineEdit, label: QLabel, message: str) -> None:
+        field.setStyleSheet(self._ERR_STYLE)
+        label.setText(message)
+        label.setVisible(True)
+        field.setFocus()
+
+    def _clear_err(self, field: QLineEdit, label: QLabel) -> None:
+        field.setStyleSheet(self._OK_STYLE)
+        label.setVisible(False)
+
+    def accept(self) -> None:  # noqa: A003
+        if not self.name.text().strip():
+            self._field_error(self.name, self._err_name, "Client name is required.")
+            return
+        super().accept()
+
+    def field_error_reference(self, message: str) -> None:
+        """Called by the parent view when the service rejects the reference."""
+        self._field_error(self.reference, self._err_ref, message)
 
     def values(self) -> tuple[str, str | None]:
         return self.name.text().strip(), (self.reference.text().strip() or None)
@@ -373,17 +412,21 @@ class ClientsView(QWidget):
 
     def _new_client(self) -> None:
         dlg = NewClientDialog(self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        name, ref = dlg.values()
-        if not name:
-            QMessageBox.warning(self, "Missing name", "Client name is required.")
-            return
-        try:
-            rec = create_client(name, ref)
-        except ClientError as e:
-            QMessageBox.warning(self, "Could not create client", str(e))
-            return
+        while True:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            name, ref = dlg.values()
+            try:
+                rec = create_client(name, ref)
+                break
+            except ClientError as e:
+                # Keep the dialog open; highlight only the failing field.
+                err = str(e)
+                if "reference" in err.lower() or "already in use" in err.lower():
+                    dlg.field_error_reference(err + " — please choose a different one.")
+                else:
+                    QMessageBox.warning(self, "Could not create client", err)
+                    return
         self.refresh()
         self.open_client.emit(rec.id, rec.display_name)
 

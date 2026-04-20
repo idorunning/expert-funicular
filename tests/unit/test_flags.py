@@ -4,6 +4,7 @@ from __future__ import annotations
 from brokerledger.categorize.flags import (
     FLAG_FAST_PAYMENT,
     FLAG_GAMBLING,
+    FLAG_INBOUND,
     deserialize_flags,
     detect_flags,
     serialize_flags,
@@ -26,9 +27,25 @@ def test_honours_fp_tag_on_merchant():
     assert FLAG_FAST_PAYMENT in flags
 
 
-def test_no_flags_for_ordinary_merchant():
-    flags = detect_flags("tesco metro london gb", "TESCO METRO")
+def test_no_flags_for_ordinary_debit_merchant():
+    flags = detect_flags("tesco metro london gb", "TESCO METRO", direction="debit")
     assert flags == []
+
+
+def test_credit_gets_inbound_flag():
+    flags = detect_flags("bank transfer received", "SOME BANK", direction="credit")
+    assert FLAG_INBOUND in flags
+
+
+def test_debit_does_not_get_inbound_flag():
+    flags = detect_flags("tesco metro", "TESCO", direction="debit")
+    assert FLAG_INBOUND not in flags
+
+
+def test_credit_fp_gets_both_flags():
+    flags = detect_flags("FASTER PAYMENT FROM JOHN", "JOHN [FP]", direction="credit")
+    assert FLAG_FAST_PAYMENT in flags
+    assert FLAG_INBOUND in flags
 
 
 def test_smart_default_gambling_debit_is_entertainment():
