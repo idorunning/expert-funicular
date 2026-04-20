@@ -28,6 +28,33 @@ from ..users.service import list_audit_actions, list_audit_users
 
 _DEFAULT_LIMIT = 500
 
+_ACTION_LABELS: dict[str, str] = {
+    "login": "Logged in",
+    "logout": "Logged out",
+    "account_locked": "Account locked (too many failed attempts)",
+    "create_user": "New user created",
+    "update_user": "User details updated",
+    "delete_user": "User deleted",
+    "set_active": "User enabled / disabled",
+    "change_password": "Password changed",
+    "password_reset_requested": "Password reset requested",
+    "password_reset_dismissed": "Password reset request dismissed",
+    "create_client": "New client added",
+    "rename_client": "Client renamed",
+    "archive_client": "Client archived",
+    "restore_client": "Client restored",
+    "delete_client": "Client deleted",
+    "reassign_client": "Client assigned to different user",
+    "import_statement": "Bank statement imported",
+    "verify_statement": "Statement marked as verified",
+    "export_client": "Client data exported",
+    "correct_category": "Transaction category corrected",
+}
+
+
+def _action_label(raw: str) -> str:
+    return _ACTION_LABELS.get(raw, raw.replace("_", " ").capitalize())
+
 
 def _format_detail(raw: str | None) -> str:
     if not raw:
@@ -36,9 +63,30 @@ def _format_detail(raw: str | None) -> str:
         parsed = json.loads(raw)
     except (TypeError, ValueError):
         return raw
-    if isinstance(parsed, dict):
-        return ", ".join(f"{k}={v}" for k, v in parsed.items())
-    return json.dumps(parsed)
+    if not isinstance(parsed, dict):
+        return json.dumps(parsed)
+    # Translate detail keys into readable phrases.
+    parts: list[str] = []
+    for k, v in parsed.items():
+        if k == "merchant" and "to" in parsed:
+            continue  # handled below with "to"
+        if k == "to" and "merchant" in parsed:
+            parts.append(f'"{parsed["merchant"]}" → {v}')
+        elif k == "from" and "to" in parsed:
+            parts.append(f"reassigned from user #{v}")
+        elif k == "to" and "from" in parsed:
+            parts.append(f"to user #{v}")
+        elif k in ("request_id", "email"):
+            pass  # omit internal IDs from display
+        elif k == "client_id":
+            parts.append(f"client #{v}")
+        elif k == "old_name":
+            parts.append(f'renamed from "{v}"')
+        elif k == "new_name":
+            parts.append(f'to "{v}"')
+        else:
+            parts.append(f"{k}: {v}")
+    return "  ".join(parts)
 
 
 class AuditLogView(QWidget):
@@ -104,7 +152,7 @@ class AuditLogView(QWidget):
         self.table = QTableWidget()
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(
-            ["When", "User", "Action", "Entity", "Details"]
+            ["When", "User", "What happened", "Record", "Details"]
         )
         h = self.table.horizontalHeader()
         h.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -145,7 +193,7 @@ class AuditLogView(QWidget):
         self.action_combo.clear()
         self.action_combo.addItem("All actions", None)
         for action in list_audit_actions():
-            self.action_combo.addItem(action, action)
+            self.action_combo.addItem(_action_label(action), action)
         if current_action is not None:
             idx = self.action_combo.findData(current_action)
             if idx >= 0:
@@ -182,13 +230,23 @@ class AuditLogView(QWidget):
 
         self.table.setRowCount(len(rows))
         for idx, (entry, username) in enumerate(rows):
-            when = entry.at.strftime("%Y-%m-%d %H:%M:%S") if entry.at else ""
+            when = entry.at.strftime("%d %b %Y  %H:%M") if entry.at else ""
             entity = ""
-            if entry.entity_type or entry.entity_id is not None:
-                entity = f"{entry.entity_type or ''}#{entry.entity_id}".strip("#")
+            if entry.entity_type:
+                label = {
+                    "user": "User",
+                    "client": "Client",
+                    "statement": "Statement",
+                    "transaction": "Transaction",
+                    "password_reset": "Reset request",
+                }.get(entry.entity_type, entry.entity_type.capitalize())
+                if entry.entity_id is not None:
+                    entity = f"{label} #{entry.entity_id}"
+                else:
+                    entity = label
             self.table.setItem(idx, 0, QTableWidgetItem(when))
             self.table.setItem(idx, 1, QTableWidgetItem(username or "—"))
-            self.table.setItem(idx, 2, QTableWidgetItem(entry.action))
+            self.table.setItem(idx, 2, QTableWidgetItem(_action_label(entry.action)))
             self.table.setItem(idx, 3, QTableWidgetItem(entity))
             self.table.setItem(idx, 4, QTableWidgetItem(_format_detail(entry.detail_json)))
 

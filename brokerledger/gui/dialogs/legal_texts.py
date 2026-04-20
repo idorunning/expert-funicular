@@ -9,6 +9,7 @@ from __future__ import annotations
 
 
 PRODUCT_NAME = "Mortgage Broker Affordability Assistant"
+PRODUCT_TAGLINE = "AI powered · Fully local · Fully secure"
 COMPANY_NAME = "Mortgage Oasis Ltd"
 COMPANY_WEBSITE = "https://www.mortgage-oasis.com"
 COMPANY_EMAIL_PRIVACY = "privacy@mortgage-oasis.com"

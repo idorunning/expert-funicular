@@ -69,20 +69,53 @@ _THRESHOLD_KEYS: dict[str, type] = {
 }
 
 
-def get_threshold(name: str):
-    """Return the user-tuned threshold from the DB, or the env/default value.
+STRICTNESS_KEY = "category_strictness"
+DEFAULT_STRICTNESS_LEVEL = 3
 
-    Falls back to ``get_settings()`` so existing tests that monkey-patch the
-    Pydantic settings object keep working.
+
+def get_strictness_level() -> int:
+    """Active strictness level (1-5). Falls back to the default if unset."""
+    try:
+        from .db import app_settings
+    except Exception:
+        return DEFAULT_STRICTNESS_LEVEL
+    try:
+        val = app_settings.get_int(STRICTNESS_KEY)
+    except Exception:
+        val = None
+    if val is None:
+        return DEFAULT_STRICTNESS_LEVEL
+    return max(1, min(5, int(val)))
+
+
+def set_strictness_level(level: int) -> None:
+    from .db import app_settings
+    level = max(1, min(5, int(level)))
+    app_settings.put(STRICTNESS_KEY, str(level))
+
+
+def get_threshold(name: str):
+    """Return the threshold for the active strictness level.
+
+    Individual env-var / pydantic-settings overrides still win (tests that
+    monkey-patch ``Settings`` keep working), then any explicit per-key
+    override stored in ``app_settings`` (legacy), then the strictness bundle.
     """
     if name not in _THRESHOLD_KEYS:
         raise KeyError(f"Unknown threshold: {name!r}")
     cast = _THRESHOLD_KEYS[name]
-    # Lazy import to avoid circulars (db -> config -> db).
+
+    # 1. Env / Pydantic override — tests rely on this path.
+    env_val = getattr(get_settings(), name)
+    defaults = THRESHOLD_DEFAULTS[name]
+    if env_val != defaults:
+        return env_val
+
+    # 2. Per-key override stored in app_settings (legacy).
     try:
         from .db import app_settings
     except Exception:
-        return getattr(get_settings(), name)
+        return env_val
     try:
         if cast is float:
             val = app_settings.get_float(name)
@@ -92,7 +125,11 @@ def get_threshold(name: str):
         val = None
     if val is not None:
         return val
-    return getattr(get_settings(), name)
+
+    # 3. Bundle from the active strictness level.
+    from .categorize.model_catalog import thresholds_for_level
+    bundle = thresholds_for_level(get_strictness_level())
+    return bundle[name]
 
 
 THRESHOLD_DEFAULTS: dict[str, float | int] = {

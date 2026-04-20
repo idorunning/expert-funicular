@@ -47,7 +47,7 @@ class _BrandHeader(QFrame):
         text_col.setSpacing(0)
         title = QLabel("Mortgage Broker Affordability Assistant")
         title.setObjectName("BrandTitle")
-        subtitle = QLabel("Mortgage affordability, fully local")
+        subtitle = QLabel("AI powered · Fully local · Fully secure")
         subtitle.setObjectName("BrandSubtitle")
         text_col.addWidget(title)
         text_col.addWidget(subtitle)

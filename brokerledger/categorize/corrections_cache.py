@@ -96,6 +96,43 @@ def append(
     _atomic_write(filtered)
 
 
+def backup_to(destination: Path) -> Path:
+    """Copy the current cache (if any) to ``destination``. Creates parent dirs.
+
+    Returns the absolute path written. If no cache exists yet an empty-list
+    JSON file is written so the user still gets a file they can restore
+    from later.
+    """
+    destination = Path(destination).expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    entries = load()
+    with destination.open("w", encoding="utf-8") as f:
+        json.dump(entries, f, indent=2, sort_keys=True)
+    return destination
+
+
+def restore_from(source: Path) -> int:
+    """Replace the active cache with the contents of ``source``.
+
+    Validates that the file parses as a JSON list of dicts before overwriting.
+    Returns the number of entries restored. Raises ``ValueError`` for malformed
+    files so the UI can surface a friendly error.
+    """
+    source = Path(source).expanduser().resolve()
+    if not source.exists():
+        raise ValueError(f"Backup file not found: {source}")
+    try:
+        with source.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise ValueError(f"Backup file is not valid JSON: {e}") from e
+    if not isinstance(data, list) or not all(isinstance(e, dict) for e in data):
+        raise ValueError("Backup file must be a JSON list of correction entries.")
+    cleaned = [e for e in data if e.get("merchant") and e.get("category")]
+    _atomic_write(cleaned)
+    return len(cleaned)
+
+
 def sync_into_db(session: Session) -> int:
     """Import any JSON entry whose (merchant, scope, client_id) is missing from
     merchant_rules. Returns how many rows were inserted."""

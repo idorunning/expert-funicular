@@ -16,117 +16,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..auth.password_reset import (
-    submit_reset_code,
-    submit_reset_request,
-    verify_and_reset,
-)
+from ..auth.password_reset import submit_reset_request
 from ..auth.service import AuthError, InvalidCredentials, login
-from ..mail import smtp as smtp_mod
 from .theme import load_logo_pixmap
-
-
-class _EmailResetDialog(QDialog):
-    """Two-step emailed reset: send code, then enter code + new password."""
-
-    def __init__(self, parent=None, initial_email: str = "") -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Reset password by email")
-        self.setMinimumWidth(460)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(10)
-
-        layout.addWidget(QLabel(
-            "Enter the email address on your account. If it matches, we'll "
-            "send a 6-digit code. The code expires in 15 minutes."
-        ))
-
-        form = QFormLayout()
-        self.email = QLineEdit()
-        self.email.setPlaceholderText("you@example.com")
-        if initial_email:
-            self.email.setText(initial_email)
-        form.addRow("Email", self.email)
-        layout.addLayout(form)
-
-        send_row = QHBoxLayout()
-        self.send_btn = QPushButton("Send code")
-        self.send_btn.clicked.connect(self._send_code)
-        send_row.addStretch(1)
-        send_row.addWidget(self.send_btn)
-        layout.addLayout(send_row)
-
-        self.second_form = QFormLayout()
-        self.code = QLineEdit()
-        self.code.setPlaceholderText("6-digit code")
-        self.code.setMaxLength(6)
-        self.second_form.addRow("Code", self.code)
-        self.new_password = QLineEdit()
-        self.new_password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.new_password.setPlaceholderText("At least 10 characters with a digit")
-        self.second_form.addRow("New password", self.new_password)
-        layout.addLayout(self.second_form)
-
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText("Set new password")
-        btns.accepted.connect(self._finish)
-        btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
-        self._ok_btn = btns.button(QDialogButtonBox.StandardButton.Ok)
-        self._ok_btn.setEnabled(False)
-        self.code.setEnabled(False)
-        self.new_password.setEnabled(False)
-
-    def _send_code(self) -> None:
-        email = self.email.text().strip()
-        if not email:
-            QMessageBox.warning(self, "Email required", "Enter your email.")
-            return
-        try:
-            _req_id, code = submit_reset_code(email)
-        except AuthError as e:
-            QMessageBox.warning(self, "Couldn't send code", str(e))
-            return
-        if code is not None:
-            try:
-                smtp_mod.send_reset_code(email, code)
-            except Exception as e:  # noqa: BLE001
-                QMessageBox.critical(
-                    self, "Could not send email",
-                    f"The SMTP server refused the message:\n{e}\n\n"
-                    "Ask an administrator to check Settings → Email (SMTP)."
-                )
-                return
-        # Enumeration-safe: same confirmation regardless of whether the email
-        # matched a real user.
-        QMessageBox.information(
-            self, "Code sent",
-            "If that email is registered, a code is on its way. "
-            "Enter it below along with your new password."
-        )
-        self.code.setEnabled(True)
-        self.new_password.setEnabled(True)
-        self._ok_btn.setEnabled(True)
-        self.code.setFocus()
-
-    def _finish(self) -> None:
-        email = self.email.text().strip()
-        code = self.code.text().strip()
-        new_pw = self.new_password.text()
-        try:
-            verify_and_reset(email, code, new_pw)
-        except AuthError as e:
-            QMessageBox.warning(self, "Couldn't reset password", str(e))
-            return
-        QMessageBox.information(
-            self, "Password updated",
-            "Your password has been reset. Log in with the new password."
-        )
-        self.accept()
 
 
 class _ForgotPasswordDialog(QDialog):
@@ -274,8 +166,4 @@ class LoginView(QWidget):
 
     def _open_forgot(self) -> None:
         initial = self.identifier.text().strip()
-        if smtp_mod.is_configured():
-            dlg = _EmailResetDialog(self, initial_email=initial)
-        else:
-            dlg = _ForgotPasswordDialog(self, initial_email=initial)
-        dlg.exec()
+        _ForgotPasswordDialog(self, initial_email=initial).exec()

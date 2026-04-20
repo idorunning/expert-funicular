@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 
 from ... import __version__
 from ..theme import load_logo_pixmap
-from .legal_texts import COMPANY_NAME, COMPANY_WEBSITE, PRODUCT_NAME
+from .legal_texts import COMPANY_NAME, COMPANY_WEBSITE, PRODUCT_NAME, PRODUCT_TAGLINE
 
 
 class AboutDialog(QDialog):
@@ -34,6 +34,10 @@ class AboutDialog(QDialog):
         title = QLabel(f"<h2 style='margin:4px 0'>{PRODUCT_NAME}</h2>")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
+
+        tagline = QLabel(f"<p style='color:#6B6679;margin:0'>{PRODUCT_TAGLINE}</p>")
+        tagline.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(tagline)
 
         version = QLabel(f"<p style='color:#555'>Version {__version__}</p>")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
