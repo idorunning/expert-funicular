@@ -8,7 +8,13 @@ popup; that commits the choice via :class:`CategoryGridDelegate`.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QModelIndex, QSize, Qt, Signal
+from PySide6.QtCore import (
+    QModelIndex,
+    QPersistentModelIndex,
+    QSize,
+    Qt,
+    Signal,
+)
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QAbstractItemDelegate,
@@ -126,32 +132,47 @@ class CategoryGridPicker(QFrame):
 
 
 class CategoryGridDelegate(QStyledItemDelegate):
-    """Delegate that pops up a :class:`CategoryGridPicker` as its editor."""
+    """Delegate that pops up a :class:`CategoryGridPicker` as its editor.
+
+    Because the picker is a top-level ``Qt.WindowType.Popup`` (so it can
+    float outside the table's viewport), Qt's default delegate plumbing
+    doesn't reliably route ``commitData`` back to ``setModelData``. We
+    therefore write the chosen category to the model directly via a
+    :class:`QPersistentModelIndex` captured at edit-open time.
+    """
 
     def createEditor(self, parent: QWidget, option, index: QModelIndex) -> QWidget:  # noqa: N802
         current = index.data(Qt.ItemDataRole.EditRole) or ""
-        picker = CategoryGridPicker(current=str(current), parent=parent)
-        # Store the selection on the picker so setModelData can read it.
-        picker._selected_category = None  # type: ignore[attr-defined]
-        picker.category_selected.connect(lambda cat, p=picker: self._on_select(p, cat))
-        # Position near the edited cell and show as a floating popup.
-        view = parent.parent() if parent else None
-        global_pos = parent.mapToGlobal(option.rect.bottomLeft()) if parent else None
-        if global_pos is not None:
-            picker.move(global_pos)
-        picker.show()
-        return picker
+        # Keep a zero-size placeholder so Qt's editor machinery is satisfied.
+        placeholder = QWidget(parent)
+        placeholder.setFixedSize(0, 0)
 
-    def _on_select(self, picker: CategoryGridPicker, category: str) -> None:
-        picker._selected_category = category  # type: ignore[attr-defined]
-        self.commitData.emit(picker)
-        self.closeEditor.emit(picker, QAbstractItemDelegate.EndEditHint.NoHint)
+        picker = CategoryGridPicker(current=str(current))
+        global_pos = parent.mapToGlobal(option.rect.bottomLeft())
+        picker.move(global_pos)
+
+        model = index.model()
+        persistent = QPersistentModelIndex(index)
+
+        def _commit(category: str) -> None:
+            if persistent.isValid():
+                target = model.index(persistent.row(), persistent.column())
+                model.setData(target, category, Qt.ItemDataRole.EditRole)
+            self.closeEditor.emit(
+                placeholder, QAbstractItemDelegate.EndEditHint.NoHint
+            )
+
+        picker.category_selected.connect(_commit)
+        # Keep the picker alive until the placeholder is destroyed.
+        placeholder._picker = picker  # type: ignore[attr-defined]
+        picker.show()
+        picker.raise_()
+        picker.activateWindow()
+        return placeholder
 
     def setEditorData(self, editor: QWidget, index: QModelIndex) -> None:  # noqa: N802
-        # Nothing to do — the picker reads its ``current`` at construction time.
         return
 
     def setModelData(self, editor: QWidget, model, index: QModelIndex) -> None:  # noqa: N802
-        chosen = getattr(editor, "_selected_category", None)
-        if chosen:
-            model.setData(index, chosen, Qt.ItemDataRole.EditRole)
+        # Writes happen in the picker's ``category_selected`` slot.
+        return
