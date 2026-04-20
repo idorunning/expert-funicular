@@ -344,6 +344,39 @@ class TransactionsModel(QAbstractTableModel):
     # Bulk confirm (no category change, just mark as user-confirmed)
     # ------------------------------------------------------------------
 
+    def bulk_apply_category(self, row_indices: list[int], new_category: str) -> int:
+        """Apply ``new_category`` to every row in ``row_indices``.
+
+        Mirrors ``setData`` for the Category column but loops over many
+        rows in one pass. Each change fires ``apply_correction`` so the
+        merchant rules pick up the new mapping and siblings propagate.
+        Returns the count of rows updated.
+        """
+        if not new_category or new_category not in user_visible_categories():
+            return 0
+        updated = 0
+        user = require_login()
+        for i in row_indices:
+            if i < 0 or i >= len(self._rows):
+                continue
+            row = self._rows[i]
+            if (row["category"] or "") == new_category and row["source"] == "user":
+                continue
+            with session_scope() as s:
+                tx = s.get(Transaction, row["id"])
+                if tx is None:
+                    continue
+                apply_correction(s, tx=tx, new_category=new_category, user_id=user.id)
+                s.commit()
+            self._apply_in_memory(i, new_category, source="user", confidence=1.0,
+                                   needs_review=False)
+            top_left = self.index(i, 0)
+            bottom_right = self.index(i, self.columnCount() - 1)
+            self.dataChanged.emit(top_left, bottom_right, [Qt.ItemDataRole.DisplayRole])
+            self._propagate_to_matching_merchant(row["merchant"], new_category)
+            updated += 1
+        return updated
+
     def confirm_rows(self, row_indices: list[int]) -> int:
         """Mark the given row indices as user-confirmed.
 
@@ -485,6 +518,16 @@ class ReviewView(QWidget):
 
         toolbar.addStretch(1)
 
+        # Apply category to selected — bulk-assigns a chosen category to
+        # every selected row.
+        self.apply_category_btn = QPushButton("🏷  Apply category to selected…")
+        self.apply_category_btn.setToolTip(
+            "Pick one category and apply it to every selected transaction."
+        )
+        self.apply_category_btn.setEnabled(False)
+        self.apply_category_btn.clicked.connect(self._apply_category_to_selected)
+        toolbar.addWidget(self.apply_category_btn)
+
         # Confirm selected — marks the selected rows as user-confirmed without
         # changing their current category.
         self.confirm_btn = QPushButton("✓  Confirm selected")
@@ -603,6 +646,32 @@ class ReviewView(QWidget):
     def _on_selection_changed(self, _selected, _deselected) -> None:
         has = bool(self.table.selectionModel().selectedRows())
         self.confirm_btn.setEnabled(has)
+        self.apply_category_btn.setEnabled(has)
+
+    def _apply_category_to_selected(self) -> None:
+        indices = self.table.selectionModel().selectedRows()
+        if not indices:
+            return
+        row_nums = sorted({i.row() for i in indices})
+
+        from .widgets.category_grid_picker import CategoryGridPicker
+
+        picker = CategoryGridPicker(current=None)
+        # Position the picker underneath the button that was clicked.
+        btn = self.apply_category_btn
+        picker.move(btn.mapToGlobal(btn.rect().bottomLeft()))
+
+        def _commit(category: str) -> None:
+            updated = self.model.bulk_apply_category(row_nums, category)
+            if updated:
+                self.refresh_summary()
+
+        picker.category_selected.connect(_commit)
+        picker.show()
+        picker.raise_()
+        picker.activateWindow()
+        # Keep a reference so the popup isn't garbage-collected before the user clicks.
+        self._bulk_picker = picker
 
     def _maybe_prompt_siblings(self) -> None:
         pending = self.model.take_pending_confirm_siblings()

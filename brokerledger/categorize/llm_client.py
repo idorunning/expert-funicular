@@ -101,6 +101,14 @@ class OllamaClient(LLMClient):
         system = build_system_prompt()
         user = build_user_prompt(description_raw, merchant_normalized, amount, direction, posted_date, few_shot)
 
+        # Opt-in merchant web lookup. When disabled this is a no-op and
+        # no outbound network request is made. Only the normalised merchant
+        # name is ever sent — see brokerledger.categorize.web_lookup.
+        from .web_lookup import lookup_merchant
+        web_hint = lookup_merchant(merchant_normalized)
+        if web_hint:
+            user = user + f"\n\nWeb lookup hint for merchant (public info only):\n{web_hint}"
+
         body = {
             "model": self.model,
             "prompt": f"{system}\n\n{user}",

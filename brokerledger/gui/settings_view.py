@@ -9,6 +9,7 @@ import httpx
 from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -208,6 +209,7 @@ class SettingsView(QWidget):
 
         layout.addWidget(self._build_profile_panel())
         layout.addWidget(self._build_ai_panel())
+        layout.addWidget(self._build_web_lookup_panel())
         layout.addWidget(self._build_thresholds_panel())
         layout.addWidget(self._build_category_register_panel())
         layout.addWidget(self._build_legal_panel())
@@ -484,6 +486,60 @@ class SettingsView(QWidget):
         dlg = PullModelDialog(url, self)
         dlg.exec()
         self.refresh_models()
+
+    # ---- Merchant web lookup (opt-in, red warning) -----------------------
+
+    def _build_web_lookup_panel(self) -> QGroupBox:
+        from ..categorize import web_lookup
+
+        box = QGroupBox("Merchant web lookup")
+        box.setStyleSheet(
+            "QGroupBox {"
+            "  border: 2px solid #A52D1E;"
+            "  border-radius: 8px;"
+            "  background: #FFF5F3;"
+            "  margin-top: 12px;"
+            "}"
+            "QGroupBox::title {"
+            "  subcontrol-origin: margin;"
+            "  left: 10px;"
+            "  padding: 0 6px;"
+            "  color: #A52D1E;"
+            "  font-weight: 700;"
+            "}"
+        )
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(12, 18, 12, 12)
+        outer.setSpacing(8)
+
+        warning = QLabel(
+            "<b style='color:#A52D1E'>⚠ Warning — this feature sends data "
+            "over the internet.</b><br><br>"
+            "When enabled, the AI will look up <b>only the merchant name</b> "
+            "(e.g. <i>TESCO METRO</i>) on DuckDuckGo to help decide the "
+            "category. No other information is ever sent:<br>"
+            "&nbsp;&nbsp;• <b>not</b> your client's name, account number, or IBAN<br>"
+            "&nbsp;&nbsp;• <b>not</b> the amount, date, direction, or balance<br>"
+            "&nbsp;&nbsp;• <b>not</b> the full description line<br><br>"
+            "Only switch this on if you are comfortable with short merchant "
+            "names leaving your machine. <b>Off is the default.</b>"
+        )
+        warning.setWordWrap(True)
+        warning.setTextFormat(Qt.TextFormat.RichText)
+        outer.addWidget(warning)
+
+        self.web_lookup_toggle = QCheckBox(
+            "Enable merchant web lookup (OFF by default)"
+        )
+        self.web_lookup_toggle.setChecked(web_lookup.is_enabled())
+        self.web_lookup_toggle.toggled.connect(self._on_web_lookup_toggled)
+        outer.addWidget(self.web_lookup_toggle)
+        return box
+
+    def _on_web_lookup_toggled(self, checked: bool) -> None:
+        from ..categorize import web_lookup
+
+        web_lookup.set_enabled(checked)
 
     # ---- Category confidence (1-5 strictness) ----------------------------
 
