@@ -41,6 +41,8 @@ def init_engine(db_file: Path | None = None, echo: bool = False) -> Engine:
     _ensure_password_reset_code_columns(_engine)
     _ensure_statement_verified_columns(_engine)
     _ensure_transaction_flags_column(_engine)
+    _ensure_transaction_source_check(_engine)
+    _migrate_retired_categories(_engine)
     _ensure_audit_log_indexes(_engine)
     return _engine
 
@@ -99,6 +101,73 @@ def _ensure_transaction_flags_column(engine: Engine) -> None:
         }
         if "flags" not in cols:
             c.exec_driver_sql("ALTER TABLE transactions ADD COLUMN flags VARCHAR(64)")
+
+
+def _ensure_transaction_source_check(engine: Engine) -> None:
+    """Rebuild the transactions table if its ck_tx_source CHECK constraint
+    pre-dates 'sibling_auto' / 'register_fuzzy' / 'flag_default' / 'seed'.
+
+    SQLite doesn't let us alter a CHECK constraint in-place, so when the
+    existing one is out of date we copy the data into a fresh table that
+    carries the current constraint, then swap them.
+    """
+    required_tokens = (
+        "sibling_auto",
+        "register_fuzzy",
+        "flag_default",
+        "seed",
+    )
+    with engine.begin() as c:
+        row = c.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'"
+        ).fetchone()
+        if not row or not row[0]:
+            return
+        ddl = row[0]
+        if all(token in ddl for token in required_tokens):
+            return
+
+        logger.info("Rebuilding transactions table to refresh ck_tx_source")
+        cols_info = c.exec_driver_sql("PRAGMA table_info(transactions)").fetchall()
+        col_names = [r[1] for r in cols_info]
+        col_list = ", ".join(col_names)
+
+        c.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        c.exec_driver_sql("ALTER TABLE transactions RENAME TO _transactions_old")
+    # Recreate the transactions table via SQLAlchemy metadata so we get the
+    # current CHECK constraint definition, then copy data across.
+    Base.metadata.tables["transactions"].create(engine)
+    with engine.begin() as c:
+        c.exec_driver_sql(
+            f"INSERT INTO transactions ({col_list}) SELECT {col_list} FROM _transactions_old"
+        )
+        c.exec_driver_sql("DROP TABLE _transactions_old")
+        c.exec_driver_sql("PRAGMA foreign_keys=ON")
+
+
+_RETIRED_CATEGORIES = (
+    "Fast payments / person-to-person",
+    "Gambling",
+)
+
+
+def _migrate_retired_categories(engine: Engine) -> None:
+    """Null out transactions still carrying retired categories from earlier
+    releases. They'll be re-flagged as gambling/fast-payment on the next
+    re-categorisation; leaving the category blank marks them for review.
+    """
+    with engine.begin() as c:
+        placeholders = ",".join(["?"] * len(_RETIRED_CATEGORIES))
+        c.exec_driver_sql(
+            f"""
+            UPDATE transactions
+            SET category = NULL,
+                category_group = NULL,
+                needs_review = 1
+            WHERE category IN ({placeholders})
+            """,
+            _RETIRED_CATEGORIES,
+        )
 
 
 def _ensure_audit_log_indexes(engine: Engine) -> None:

@@ -71,10 +71,14 @@ def category_names() -> set[str]:
 
 
 def group_of(category: str) -> str:
+    # Unknown or retired categories fall back to "discretionary" so callers
+    # (e.g. apply_correction when a user confirms a row whose category was
+    # retired in a later release) don't crash. The row stays flagged for
+    # re-review via the normal needs_review path.
     for c in all_categories():
         if c.name == category:
             return c.group
-    raise KeyError(f"Unknown category: {category!r}")
+    return GROUP_DISCRETIONARY
 
 
 def user_visible_categories() -> list[str]:
