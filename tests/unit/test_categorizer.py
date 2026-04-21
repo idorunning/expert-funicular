@@ -238,11 +238,44 @@ def test_fast_payments_is_flagged(logged_in_admin, tmp_path: Path):
                 Transaction.description_raw == "FASTER PAYMENT JOHN SMITH",
             )
         ).scalar_one()
-    # FP debit = category blank, flag set, always flagged for review.
-    assert row.category in ("", None)
+    # FP debit: the flag chip is set and the row is flagged for review, but
+    # the category still comes from the normal pipeline (register/LLM). A
+    # bare "JOHN SMITH" name has no signal so the LLM falls through to its
+    # low-confidence default — that's fine; the broker will reassign.
     assert FLAG_FAST_PAYMENT in deserialize_flags(row.flags)
     assert row.needs_review == 1
-    assert row.source == "flag_default"
+    assert row.source != "flag_default"
+
+
+def test_fast_payment_debit_still_categorised_from_description(
+    logged_in_admin, tmp_path: Path,
+):
+    """Regression: the Fast Payment flag used to short-circuit the whole
+    pipeline for debits, so "Liam Tracey (Pocket money) FASTER PAYMENT"
+    came out with a blank category even though "pocket money" is in the
+    Child care taxonomy description. The flag should now be purely a chip
+    marker — categorisation still runs, the row is just force-flagged for
+    review so the broker confirms the recipient."""
+    from brokerledger.categorize.flags import FLAG_FAST_PAYMENT, deserialize_flags
+
+    client = create_client("FP Pocket Money Client")
+    p = tmp_path / "fp_pocket.csv"
+    p.write_text(
+        "Date,Description,Debit,Credit,Balance\n"
+        "04/04/2025,Liam Tracey (Pocket money) FASTER PAYMENT,2.00,,998.00\n",
+        encoding="utf-8",
+    )
+    result = ingest_statement(client.id, p)
+    categorize_statement(result.statement_id, llm=FakeLLMClient())
+
+    with session_scope() as s:
+        row = s.execute(
+            select(Transaction).where(Transaction.client_id == client.id)
+        ).scalar_one()
+    assert FLAG_FAST_PAYMENT in deserialize_flags(row.flags)
+    assert row.category == "Child care"
+    assert row.needs_review == 1
+    assert row.source != "flag_default"
 
 
 def test_thresholds_from_app_settings_override_env(logged_in_admin):

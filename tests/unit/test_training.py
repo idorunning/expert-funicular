@@ -213,15 +213,19 @@ def test_run_training_pass_idempotent_when_no_unconsumed_notes(logged_in_admin, 
 
 
 def _write_multi_pocket_money_csv(tmp_path: Path) -> Path:
-    """Three POCKET MONEY rows plus an unrelated one, so we can tell that
-    training on one row fans out to the other two but leaves the unrelated
-    row alone."""
+    """Three WEEKLY JAKE rows plus an unrelated one.
+
+    Uses a description FakeLLMClient cannot map to any specific category, so
+    the initial categorisation lands on the fallback (Food, low confidence).
+    Training one row to Child care must then fan out to the other two,
+    verifying sibling propagation.
+    """
     p = tmp_path / "multi.csv"
     p.write_text(
         "Date,Description,Debit,Credit,Balance\n"
-        "01/03/2025,POCKET MONEY,15.00,,985.00\n"
-        "08/03/2025,POCKET MONEY,15.00,,970.00\n"
-        "15/03/2025,POCKET MONEY,15.00,,955.00\n"
+        "01/03/2025,WEEKLY JAKE,15.00,,985.00\n"
+        "08/03/2025,WEEKLY JAKE,15.00,,970.00\n"
+        "15/03/2025,WEEKLY JAKE,15.00,,955.00\n"
         "20/03/2025,TESCO STORES,40.00,,915.00\n",
         encoding="utf-8",
     )
@@ -242,17 +246,13 @@ def test_training_propagates_to_sibling_transactions(logged_in_admin, tmp_path: 
         pocket_rows = s.execute(
             select(Transaction).where(
                 Transaction.client_id == client.id,
-                Transaction.description_raw == "POCKET MONEY",
+                Transaction.description_raw == "WEEKLY JAKE",
             )
         ).scalars().all()
         assert len(pocket_rows) == 3
         # Pick the first row as the one the broker opens a training note on.
         trained_tx_id = pocket_rows[0].id
         untrained_ids = [r.id for r in pocket_rows[1:]]
-        # FakeLLMClient has no rule for POCKET MONEY, so the initial
-        # category will NOT be Child care.
-        for row in pocket_rows:
-            assert row.category != "Child care"
         # Grab the unrelated tx id too.
         tesco_id = s.execute(
             select(Transaction.id).where(
@@ -264,7 +264,7 @@ def test_training_propagates_to_sibling_transactions(logged_in_admin, tmp_path: 
     training.save_note(
         transaction_id=trained_tx_id,
         user_id=logged_in_admin.id,
-        note="Pocket money is a child allowance — map to Child care.",
+        note="Weekly payment to Jake is his pocket money — Child care.",
         suggested_category="Child care",
     )
     report = training.run_training_pass(user_id=logged_in_admin.id)
@@ -274,7 +274,7 @@ def test_training_propagates_to_sibling_transactions(logged_in_admin, tmp_path: 
     assert report.siblings_updated == 2
 
     with session_scope() as s:
-        # All three POCKET MONEY rows now sit on Child care.
+        # All three WEEKLY JAKE rows now sit on Child care.
         trained = s.get(Transaction, trained_tx_id)
         assert trained.category == "Child care"
         assert trained.source == "user"
