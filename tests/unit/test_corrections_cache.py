@@ -90,6 +90,44 @@ def test_sync_into_db_imports_missing_rules(logged_in_admin, tmp_path: Path):
         assert corrections_cache.sync_into_db(s) == 0
 
 
+def test_sync_into_db_skips_orphaned_client_rules(logged_in_admin, tmp_path: Path):
+    # Regression test: a cached correction referencing a deleted client_id
+    # must not brick startup with a FOREIGN KEY constraint error.
+    p = corrections_cache.cache_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        json.dumps([
+            {
+                "merchant": "FRESH AND LOCAL CONTACTLESS",
+                "category": "Food",
+                "group": "discretionary",
+                "scope": "client",
+                "client_id": 9999,  # does not exist
+                "weight": 2,
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+            {
+                "merchant": "STILL GLOBAL",
+                "category": "Food",
+                "group": "discretionary",
+                "scope": "global",
+                "client_id": None,
+                "weight": 2,
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+        ]),
+        encoding="utf-8",
+    )
+
+    with session_scope() as s:
+        inserted = corrections_cache.sync_into_db(s)
+        # Only the global rule should land; the orphan is skipped silently.
+        assert inserted == 1
+        rows = s.execute(select(MerchantRule)).scalars().all()
+        assert all(r.merchant_normalized != "FRESH AND LOCAL CONTACTLESS" for r in rows)
+        assert any(r.merchant_normalized == "STILL GLOBAL" for r in rows)
+
+
 def test_cache_path_respects_env_override(tmp_path: Path, monkeypatch):
     override = tmp_path / "custom" / "corrections.json"
     monkeypatch.setenv("BROKERLEDGER_CORRECTIONS_CACHE", str(override))

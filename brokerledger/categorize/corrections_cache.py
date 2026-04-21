@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import paths
-from ..db.models import MerchantRule, utcnow
+from ..db.models import Client, MerchantRule, utcnow
 from ..utils.logging import logger
 
 _PATH_ENV = "BROKERLEDGER_CORRECTIONS_CACHE"
@@ -135,11 +135,21 @@ def restore_from(source: Path) -> int:
 
 def sync_into_db(session: Session) -> int:
     """Import any JSON entry whose (merchant, scope, client_id) is missing from
-    merchant_rules. Returns how many rows were inserted."""
+    merchant_rules. Returns how many rows were inserted.
+
+    Orphaned client-scoped entries (whose ``client_id`` no longer exists —
+    typically because the client was deleted after the correction was cached)
+    are skipped to avoid a FOREIGN KEY constraint failure that would otherwise
+    brick startup. A warning is logged so the broker can spot stale cache rows.
+    """
     entries = load()
     if not entries:
         return 0
+    live_client_ids = set(
+        session.execute(select(Client.id)).scalars().all()
+    )
     inserted = 0
+    skipped_orphans = 0
     now = utcnow()
     for e in entries:
         merchant = (e.get("merchant") or "").strip()
@@ -147,6 +157,9 @@ def sync_into_db(session: Session) -> int:
         scope = (e.get("scope") or "").strip()
         client_id = e.get("client_id")
         if not merchant or not category or scope not in {"client", "global"}:
+            continue
+        if scope == "client" and client_id not in live_client_ids:
+            skipped_orphans += 1
             continue
         existing = session.execute(
             select(MerchantRule).where(
@@ -170,6 +183,11 @@ def sync_into_db(session: Session) -> int:
             last_seen_at=now,
         ))
         inserted += 1
+    if skipped_orphans:
+        logger.warning(
+            "Corrections cache: skipped {} entries referencing deleted clients",
+            skipped_orphans,
+        )
     if inserted:
         session.commit()
     return inserted
