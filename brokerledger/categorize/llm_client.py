@@ -21,6 +21,7 @@ class LLMResult:
     group: str
     confidence: float
     reason: str
+    thinking: str = ""
 
 
 class LLMError(Exception):
@@ -109,11 +110,14 @@ class OllamaClient(LLMClient):
         if web_hint:
             user = user + f"\n\nWeb lookup hint for merchant (public info only):\n{web_hint}"
 
+        from ..config import get_settings as _gs
+        _s = _gs()
         body = {
             "model": self.model,
             "prompt": f"{system}\n\n{user}",
             "format": "json",
             "stream": False,
+            "think": _s.llm_native_thinking,
             "options": {"temperature": 0.1, "num_ctx": 4096},
         }
         try:
@@ -124,7 +128,11 @@ class OllamaClient(LLMClient):
             raise LLMError(f"LLM call failed: {e}") from e
 
         text = data.get("response", "").strip()
-        return _parse_llm_json(text)
+        result = _parse_llm_json(text)
+        # Capture native thinking trace when the model supports it (Ollama returns
+        # a "thinking" key alongside "response" when think=True is honoured).
+        result.thinking = data.get("thinking", "") or ""
+        return result
 
 
 def _parse_llm_json(text: str) -> LLMResult:

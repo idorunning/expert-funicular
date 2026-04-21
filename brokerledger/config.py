@@ -16,11 +16,20 @@ class Settings(BaseSettings):
     model_priority: tuple[str, ...] = (
         "gemma4:e4b",
         "gemma4:4b",
+        "gemma4:e2b",
+        "gemma4:2b",
         "gemma3:4b",
         "gemma3n:e4b",
         "llama3.2:3b-instruct",
         "llama3.1:8b",
     )
+
+    # Whether to pass think=True to Ollama (enables native model chain-of-thought).
+    # Models that don't support thinking ignore this flag gracefully.
+    llm_native_thinking: bool = True
+
+    # Fallback: if first LLM pass confidence < this, retry with web lookup (when enabled).
+    llm_web_fallback_threshold: float = 0.45
 
     # Categorisation thresholds.
     fuzzy_high: int = 92
