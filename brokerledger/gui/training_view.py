@@ -156,7 +156,10 @@ class TrainingView(QWidget):
         title_col.setSpacing(2)
         title = QLabel("◉ AI TRAINING ZONE")
         title.setObjectName("TrainingTitle")
-        subtitle = QLabel("Review the AI's reasoning. Guide it. Train. Improve.")
+        subtitle = QLabel(
+            "Teach the AI client-specific mappings that general knowledge "
+            "can't infer."
+        )
         subtitle.setObjectName("TrainingSubtitle")
         title_col.addWidget(title)
         title_col.addWidget(subtitle)

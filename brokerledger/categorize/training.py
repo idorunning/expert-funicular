@@ -1,4 +1,18 @@
-"""AI Training Zone backend — collect broker guidance, consume it on demand.
+"""AI Training Zone backend — client-specific overrides only.
+
+Training is the escape hatch for mappings a general-purpose model cannot
+reasonably infer from the taxonomy (which already carries an ``includes:``
+line per category describing the vocabulary that belongs in it). Use it for
+things like:
+
+- ``PAYMENT TO MUM`` => Other income (family gift, specific to this client).
+- ``JOHN (FP)`` => Rent (paying a named landlord, specific to this client).
+- An employer name the broker wants pinned under Salary/Wages.
+
+Do NOT use training to correct ordinary UK household terms. If the model
+mis-categorises something generic ("pocket money", "council tax", "takeaway"),
+the fix is to refine that category's ``CATEGORY_INCLUDES`` entry so every
+broker benefits — not to train each peculiarity per client.
 
 Flow:
 - When the broker reads a transaction's chain-of-thought reasoning in Review
@@ -8,7 +22,9 @@ Flow:
 - When the broker clicks "Start Training" in the AI Training Zone,
   ``run_training_pass`` iterates the unconsumed notes. For each note with a
   suggested category it upserts the merchant rule (same flow the existing
-  register/feedback loop uses) and marks the note consumed.
+  register/feedback loop uses) and marks the note consumed. Sibling rows on
+  the same client statement that look alike are fanned out so the broker
+  doesn't have to train the same merchant row-by-row.
 - Notes without a suggested category stay pending — they're visible in the UI
   but require the broker to pick a target category before they can train.
 """

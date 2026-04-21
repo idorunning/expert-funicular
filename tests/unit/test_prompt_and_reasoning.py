@@ -9,6 +9,7 @@ from sqlalchemy import select
 from brokerledger.categorize.categorizer import categorize_statement
 from brokerledger.categorize.llm_client import FakeLLMClient, FewShotExample, LLMResult
 from brokerledger.categorize.prompts import build_system_prompt
+from brokerledger.categorize.taxonomy import user_visible_categories
 from brokerledger.clients.service import create_client
 from brokerledger.db.engine import session_scope
 from brokerledger.db.models import Transaction
@@ -28,40 +29,55 @@ def test_prompt_declares_thinking_key_in_schema():
     assert '"thinking"' in prompt
 
 
-def test_prompt_contains_pocket_money_worked_example():
+def test_prompt_contains_includes_line_per_user_visible_category():
+    """Every user-visible category must appear with an ``includes:`` hint so
+    the model reasons from category descriptions rather than memorised
+    merchant names. This is the mechanism that lets the model infer e.g.
+    ``POCKET MONEY -> Child care`` from the taxonomy alone."""
     prompt = build_system_prompt()
-    assert "POCKET MONEY" in prompt
-    assert "Child care" in prompt
+    for cat in user_visible_categories():
+        assert cat in prompt, f"Category {cat!r} missing from prompt"
+        # Locate the category line and assert the includes hint is attached.
+        line_start = prompt.find(f":: {cat}")
+        assert line_start >= 0, f"Category line for {cat!r} not found"
+        line_end = prompt.find("\n", line_start)
+        line = prompt[line_start:line_end]
+        assert "includes:" in line, (
+            f"Category {cat!r} line has no includes hint: {line!r}"
+        )
 
 
-def test_prompt_contains_salary_and_takeaway_worked_examples():
+def test_prompt_mentions_pocket_money_via_child_care_description():
+    """POCKET MONEY is covered via the Child care description's vocabulary,
+    not as a hard-coded worked example. That's what allows the model to
+    generalise to other allowance-like terms."""
     prompt = build_system_prompt()
+    lower = prompt.lower()
+    # Pocket money should appear — but in the Child care includes line,
+    # not as a "Description (as printed): POCKET MONEY" worked example.
+    assert "pocket money" in lower
+    assert 'description (as printed): "pocket money"' not in lower
+
+
+def test_prompt_keeps_single_format_example_only():
+    """The prompt should keep exactly one worked example (a SALARY credit)
+    to demonstrate the JSON output shape. Content-specific worked examples
+    (POCKET MONEY, ALLOWANCE, JUST EAT) have been retired — they are
+    redundant with the taxonomy's includes hints."""
+    prompt = build_system_prompt()
+    # The format-demonstrating example survives.
     assert "SALARY" in prompt
-    assert "JUST EAT" in prompt
-
-
-def test_prompt_child_care_example_group_matches_taxonomy():
-    """Regression: the POCKET MONEY -> Child care example must declare
-    ``"group": "discretionary"`` because ``Child care`` lives in the
-    discretionary taxonomy. A contradiction between the worked example's
-    group and the taxonomy listing confuses small local models and was
-    observed to push them off the Child care mapping entirely."""
-    prompt = build_system_prompt()
-    # Locate the POCKET MONEY example block and make sure Child care is
-    # paired with discretionary, not committed, inside it.
-    idx = prompt.index("POCKET MONEY")
-    end = prompt.index("}", idx)
-    block = prompt[idx:end]
-    assert '"category": "Child care"' in block
-    assert '"group": "discretionary"' in block
-    assert '"group": "committed"' not in block
+    # Content-specific worked examples have been removed.
+    assert 'Description (as printed): "JUST EAT LONDON"' not in prompt
+    assert 'Description (as printed): "ALLOWANCE"' not in prompt
+    assert 'Description (as printed): "POCKET MONEY"' not in prompt
 
 
 def test_prompt_does_not_instruct_model_to_avoid_examples():
     """Regression: an earlier iteration told the model ``do NOT copy
-    verbatim``, which small models read as 'don't reuse the POCKET MONEY ->
-    Child care mapping'. We want the opposite behaviour — reuse the
-    mappings when the input matches."""
+    verbatim``, which small models read as 'don't reuse the taxonomy
+    mappings'. We want the opposite behaviour — reason from the includes
+    hints and pick the matching category."""
     prompt = build_system_prompt()
     lower = prompt.lower()
     assert "do not copy" not in lower

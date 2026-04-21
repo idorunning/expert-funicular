@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from .taxonomy import (
+    CATEGORY_INCLUDES,
     COMMITTED_CATEGORIES,
     DISCRETIONARY_CATEGORIES,
     EXCLUDED_CATEGORIES,
@@ -19,12 +20,26 @@ class FewShotExample:
     amount: Decimal | None = None
 
 
+def _render_taxonomy_line(group: str, category: str) -> str:
+    hint = CATEGORY_INCLUDES.get(category, "")
+    if hint:
+        return f"{group} :: {category} — includes: {hint}"
+    return f"{group} :: {category}"
+
+
 def build_system_prompt() -> str:
     lines = [
         "You are a UK mortgage broker's categorisation assistant. For every "
         "transaction, think step by step about what the description most "
         "likely represents in a UK household context, then choose exactly "
-        "one category from the taxonomy.",
+        "one category from the taxonomy below.",
+        "",
+        "Reason from the taxonomy's 'includes:' descriptions — they tell you "
+        "what each category covers. Do not rely on merchant names you have "
+        "memorised; match the transaction's description against the category "
+        "descriptions and pick the best semantic fit. If a description word "
+        "(e.g. 'pocket money', 'nursery', 'takeaway', 'broadband') appears "
+        "in a category's 'includes:' line, that is a strong signal.",
         "",
         "You MUST return a single JSON object and nothing else.",
         "You MUST pick a category strictly from the provided taxonomy (the "
@@ -35,8 +50,9 @@ def build_system_prompt() -> str:
         "",
         "Output JSON schema with these EXACT keys (all mandatory):",
         '  "thinking":   3-6 sentences of plain reasoning. Walk through the '
-        "clues you used (merchant words, amount, direction, date). "
-        "Acknowledge uncertainty explicitly when you feel it.",
+        "clues you used (merchant words, amount, direction, date) and which "
+        "category 'includes:' line they match. Acknowledge uncertainty "
+        "explicitly when you feel it.",
         '  "category":   one of the taxonomy categories below (exact string, '
         "right-hand side only).",
         '  "group":      committed | discretionary | income | excluded',
@@ -44,24 +60,22 @@ def build_system_prompt() -> str:
         "unsure.",
         '  "reason":     <= 140 char broker-facing summary.',
         "",
-        "Worked examples — reuse the same mappings when the new transaction "
-        "matches one of these patterns. Examples use the exact same input "
-        "format you will receive below.",
+        "Taxonomy (group :: category — includes: vocabulary that belongs in "
+        "this category):",
+    ]
+    for c in COMMITTED_CATEGORIES:
+        lines.append(_render_taxonomy_line("committed", c))
+    for c in DISCRETIONARY_CATEGORIES:
+        lines.append(_render_taxonomy_line("discretionary", c))
+    for c in INCOME_CATEGORIES:
+        lines.append(_render_taxonomy_line("income", c))
+    for c in EXCLUDED_CATEGORIES:
+        lines.append(_render_taxonomy_line("excluded", c))
+    lines.extend([
         "",
-        'Description (as printed): "POCKET MONEY"',
-        'Normalised merchant: "POCKET MONEY"',
-        "Amount (GBP, sign = direction): -15.00",
-        "Direction: debit",
-        "{",
-        '  "thinking": "Pocket money is the UK term for a weekly allowance '
-        "a parent gives to a child. £15 fits a child's allowance. The broker "
-        "tracks this under Child care because it is a household cost of "
-        'raising children, not Entertainment or a bank transfer.",',
-        '  "category": "Child care",',
-        '  "group": "discretionary",',
-        '  "confidence": 0.85,',
-        '  "reason": "Pocket money = child allowance -> Child care"',
-        "}",
+        "Example of the output shape — follow this schema exactly, but "
+        "reason from the taxonomy descriptions above for the actual "
+        "category choice:",
         "",
         'Description (as printed): "SALARY HSBC"',
         'Normalised merchant: "SALARY HSBC"',
@@ -70,51 +84,14 @@ def build_system_prompt() -> str:
         "{",
         '  "thinking": "A credit labelled SALARY is a wage payment from an '
         "employer; HSBC is the paying bank. Direction is credit, amount is "
-        'consistent with a monthly net salary.",',
+        "consistent with a monthly net salary. The Salary/Wages 'includes:' "
+        'line covers SALARY / WAGES / PAYROLL credits.",',
         '  "category": "Salary/Wages",',
         '  "group": "income",',
         '  "confidence": 0.95,',
         '  "reason": "Salary credit from employer"',
         "}",
-        "",
-        'Description (as printed): "JUST EAT LONDON"',
-        'Normalised merchant: "JUST EAT"',
-        "Amount (GBP, sign = direction): -22.40",
-        "Direction: debit",
-        "{",
-        '  "thinking": "Just Eat is a takeaway food delivery platform. '
-        "Debits to it are discretionary food spending rather than weekly "
-        'groceries.",',
-        '  "category": "Food",',
-        '  "group": "discretionary",',
-        '  "confidence": 0.88,',
-        '  "reason": "Takeaway via Just Eat"',
-        "}",
-        "",
-        'Description (as printed): "ALLOWANCE"',
-        'Normalised merchant: "ALLOWANCE"',
-        "Amount (GBP, sign = direction): -20.00",
-        "Direction: debit",
-        "{",
-        '  "thinking": "A debit labelled ALLOWANCE with no other context is '
-        "the same pattern as POCKET MONEY — a recurring small payment a "
-        'parent gives to a child. Classify as Child care.",',
-        '  "category": "Child care",',
-        '  "group": "discretionary",',
-        '  "confidence": 0.78,',
-        '  "reason": "Allowance = child allowance -> Child care"',
-        "}",
-        "",
-        "Taxonomy (group :: category) — pick category string only:",
-    ]
-    for c in COMMITTED_CATEGORIES:
-        lines.append(f"committed :: {c}")
-    for c in DISCRETIONARY_CATEGORIES:
-        lines.append(f"discretionary :: {c}")
-    for c in INCOME_CATEGORIES:
-        lines.append(f"income :: {c}")
-    for c in EXCLUDED_CATEGORIES:
-        lines.append(f"excluded :: {c}")
+    ])
     return "\n".join(lines)
 
 

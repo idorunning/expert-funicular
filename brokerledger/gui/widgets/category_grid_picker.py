@@ -29,6 +29,7 @@ from ...categorize.icons import icon_path_for
 from ...categorize.taxonomy import (
     COMMITTED_CATEGORIES,
     DISCRETIONARY_CATEGORIES,
+    includes_for,
     user_visible_categories,
 )
 
@@ -108,7 +109,8 @@ class CategoryGridPicker(QFrame):
             btn = QToolButton(self)
             btn.setText(cat)
             btn.setCheckable(True)
-            btn.setToolTip(cat)
+            hint = includes_for(cat)
+            btn.setToolTip(f"{cat}\n\n{hint}" if hint else cat)
             btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             btn.setIconSize(QSize(28, 28))
             btn.setMinimumSize(QSize(108, 78))
