@@ -36,7 +36,6 @@ from ..categorize.model_catalog import (
     STRICTNESS_COLORS,
     STRICTNESS_LABELS,
     STRICTNESS_LEVELS,
-    describe,
     recommended_level_for_model,
     thresholds_for_level,
 )
@@ -307,21 +306,19 @@ class SettingsView(QWidget):
         layout.setContentsMargins(12, 18, 12, 12)
         layout.setSpacing(10)
 
-        # Status row
+        # Status + refresh
         status_row = QHBoxLayout()
         status_row.setSpacing(8)
         self.status_label = QLabel("Checking…")
         self.status_label.setWordWrap(True)
         status_row.addWidget(self.status_label, 1)
-        check_btn = QPushButton("Check for models")
+        check_btn = QPushButton("Refresh")
         check_btn.setToolTip("Ask Ollama which models are installed right now.")
         check_btn.clicked.connect(self.refresh_models)
         status_row.addWidget(check_btn)
         layout.addLayout(status_row)
 
-        # Model picker row: combo + save next to it
-        picker_row = QHBoxLayout()
-        picker_row.setSpacing(8)
+        # Model list — just names, no descriptions.
         from PySide6.QtWidgets import QComboBox
         self.model_combo = QComboBox()
         self.model_combo.setEditable(False)
@@ -329,48 +326,33 @@ class SettingsView(QWidget):
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
         self.model_combo.setMinimumWidth(280)
-        self.model_combo.currentIndexChanged.connect(self._on_model_combo_changed)
-        picker_row.addWidget(self.model_combo, 1)
+        layout.addWidget(self.model_combo)
 
-        self.save_model_btn = QPushButton("Use this model")
-        self.save_model_btn.setToolTip("Set this model as the active model for all categorisation.")
-        self.save_model_btn.clicked.connect(self._save_model)
-        picker_row.addWidget(self.save_model_btn)
-
-        pull_btn = QPushButton("Download model…")
-        pull_btn.setToolTip("Download a new model from Ollama.")
-        pull_btn.clicked.connect(self._pull_dialog)
-        picker_row.addWidget(pull_btn)
-        layout.addLayout(picker_row)
-
-        # Description label (updates with combo)
-        self.model_desc = QLabel("")
-        self.model_desc.setWordWrap(True)
-        self.model_desc.setStyleSheet("QLabel { color: #6B6679; font-style: italic; padding: 2px 0; }")
-        layout.addWidget(self.model_desc)
-
-        # Test output
-        self.test_output = QLabel("")
-        self.test_output.setWordWrap(True)
-        self.test_output.setStyleSheet("QLabel { color: #555; padding-top: 4px; }")
-        layout.addWidget(self.test_output)
-
-        test_btn = QPushButton("Test current model")
-        test_btn.setToolTip(
-            "Send a test transaction to the model and show what category it picks."
+        # Three action buttons in a single row.
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        self.default_btn = QPushButton("Default model")
+        self.default_btn.setToolTip(
+            "Use the selected model for every categorisation run."
         )
-        test_btn.clicked.connect(self._test_model)
-        test_row = QHBoxLayout()
-        test_row.addStretch(1)
-        test_row.addWidget(test_btn)
-        layout.addLayout(test_row)
+        self.default_btn.clicked.connect(self._save_model)
+        btn_row.addWidget(self.default_btn)
+
+        download_btn = QPushButton("Download new model")
+        download_btn.setToolTip("Download a model from Ollama.")
+        download_btn.clicked.connect(self._pull_dialog)
+        btn_row.addWidget(download_btn)
+
+        self.remove_btn = QPushButton("Remove model")
+        self.remove_btn.setToolTip(
+            "Permanently delete the selected model from this machine."
+        )
+        self.remove_btn.clicked.connect(self._remove_model)
+        btn_row.addWidget(self.remove_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
 
         return box
-
-    def _on_model_combo_changed(self) -> None:
-        tag = self._selected_model()
-        info = describe(tag)
-        self.model_desc.setText(info.description if tag else "")
 
     def refresh_models(self) -> None:
         url = get_settings().ollama_url
@@ -392,21 +374,18 @@ class SettingsView(QWidget):
 
         current_pref = app_settings.get("ollama_model") or get_settings().ollama_model or ""
 
-        from PySide6.QtWidgets import QComboBox
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
         if current_pref and current_pref not in available:
             self.model_combo.addItem(f"{current_pref}  (not installed)", current_pref)
         for m in available:
-            info = describe(m)
-            self.model_combo.addItem(f"{info.display}  —  {info.description}", m)
+            self.model_combo.addItem(m, m)
         if current_pref:
             for i in range(self.model_combo.count()):
                 if (self.model_combo.itemData(i) or "").startswith(current_pref):
                     self.model_combo.setCurrentIndex(i)
                     break
         self.model_combo.blockSignals(False)
-        self._on_model_combo_changed()
 
     def _selected_model(self) -> str:
         data = self.model_combo.currentData()
@@ -415,8 +394,6 @@ class SettingsView(QWidget):
         text = self.model_combo.currentText().strip()
         if "  (not installed)" in text:
             text = text.split("  (not installed)")[0]
-        elif "  — " in text:
-            text = text.split("  — ")[0].strip()
         return text
 
     def _save_model(self) -> None:
@@ -433,9 +410,55 @@ class SettingsView(QWidget):
             self._suggest_strictness_update(model, rec)
         else:
             QMessageBox.information(
-                self, "Model saved",
-                f"The AI will now use '{model}' for categorisation.",
+                self, "Default model set",
+                f"'{model}' is now the default model.",
             )
+
+    def _remove_model(self) -> None:
+        model = self._selected_model()
+        if not model:
+            QMessageBox.information(self, "No model selected", "Pick a model to remove first.")
+            return
+        current_default = app_settings.get("ollama_model") or get_settings().ollama_model or ""
+        warn = ""
+        if model == current_default:
+            warn = (
+                "\n\nThis is currently the default model. After removing it, "
+                "pick another installed model as the default."
+            )
+        reply = QMessageBox.question(
+            self,
+            "Remove model?",
+            f"Permanently delete '{model}' from this machine?{warn}\n\n"
+            "You can download it again later if needed.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        url = app_settings.get("ollama_url") or get_settings().ollama_url
+        try:
+            r = httpx.request(
+                "DELETE",
+                f"{url.rstrip('/')}/api/delete",
+                json={"name": model},
+                timeout=30.0,
+            )
+            if r.status_code >= 400:
+                raise LLMError(f"HTTP {r.status_code}: {r.text[:200]}")
+        except (httpx.HTTPError, LLMError) as e:
+            logger.warning("Remove model failed: {}", e)
+            QMessageBox.critical(
+                self, "Remove failed",
+                f"Could not remove '{model}':\n\n{e}",
+            )
+            return
+        if model == current_default:
+            app_settings.delete("ollama_model")
+        self.refresh_models()
+        QMessageBox.information(
+            self, "Model removed", f"'{model}' was removed from this machine."
+        )
 
     def _suggest_strictness_update(self, model: str, rec: int) -> None:
         from PySide6.QtWidgets import QMessageBox
@@ -450,36 +473,6 @@ class SettingsView(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             set_strictness_level(rec)
             self._load_strictness()
-
-    def _test_model(self) -> None:
-        from decimal import Decimal
-        model = self._selected_model()
-        if not model:
-            QMessageBox.information(self, "No model selected", "Select a model to test first.")
-            return
-        url = app_settings.get("ollama_url") or get_settings().ollama_url
-        self.test_output.setText("Running a test — this may take a few seconds…")
-        try:
-            client = OllamaClient(base_url=url, model=model)
-            result = client.classify(
-                description_raw="TESCO STORES 2345 LONDON",
-                merchant_normalized="TESCO STORES",
-                amount=Decimal("-34.20"),
-                direction="debit",
-                posted_date="2025-03-05",
-                few_shot=[],
-            )
-            self.test_output.setText(
-                f"<b style='color:#176b1a'>✓ Test passed</b> · "
-                f"category: <b>{result.category}</b> · "
-                f"certainty: {result.confidence:.0%}"
-                + (f" · <i>{result.reason}</i>" if result.reason else "")
-            )
-        except LLMError as e:
-            logger.warning("Settings test call failed: {}", e)
-            self.test_output.setText(
-                f"<b style='color:#a52d1e'>✗ Test failed</b> — {e}"
-            )
 
     def _pull_dialog(self) -> None:
         url = app_settings.get("ollama_url") or get_settings().ollama_url

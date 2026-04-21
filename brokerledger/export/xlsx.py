@@ -32,24 +32,40 @@ def _autosize(ws, max_col: int) -> None:
         ws.column_dimensions[letter].width = max_len + 2
 
 
-def _write_header(ws, headers: list[str]) -> None:
+def _write_header(ws, headers: list[str], *, start_row: int = 1) -> None:
     for col, h in enumerate(headers, start=1):
-        cell = ws.cell(row=1, column=col, value=h)
+        cell = ws.cell(row=start_row, column=col, value=h)
         cell.font = _BOLD
         cell.fill = _HEADER_FILL
         cell.alignment = Alignment(horizontal="left")
-    ws.freeze_panes = "A2"
+    ws.freeze_panes = ws.cell(row=start_row + 1, column=1).coordinate
 
 
-def _transactions_sheet(wb: Workbook, client_id: int) -> None:
+def _write_client_banner(ws, client_name: str, reference: str | None) -> int:
+    """Write a 'Client: X' row at the top of a data sheet.
+
+    Returns the next free row number so the header can be placed below.
+    """
+    label = f"Client: {client_name}"
+    if reference:
+        label += f"  ·  Ref: {reference}"
+    cell = ws.cell(row=1, column=1, value=label)
+    cell.font = Font(bold=True, size=12)
+    return 3  # leave row 2 blank, header starts on row 3
+
+
+def _transactions_sheet(wb: Workbook, client_id: int, client_name: str,
+                        reference: str | None) -> None:
     from ..categorize.flags import deserialize_flags, flag_display_name
 
     ws = wb.create_sheet("Transactions")
+    header_row = _write_client_banner(ws, client_name, reference)
     headers = [
+        "Client",
         "Date", "Description", "Merchant", "Amount (GBP)", "Direction",
         "Category", "Group", "Certainty", "Method", "Flags", "Flagged",
     ]
-    _write_header(ws, headers)
+    _write_header(ws, headers, start_row=header_row)
     with session_scope() as s:
         rows = s.execute(
             select(Transaction).where(Transaction.client_id == client_id)
@@ -57,6 +73,7 @@ def _transactions_sheet(wb: Workbook, client_id: int) -> None:
         ).scalars().all()
         for r in rows:
             ws.append([
+                client_name,
                 r.posted_date,
                 r.description_raw,
                 r.merchant_normalized,
@@ -69,21 +86,28 @@ def _transactions_sheet(wb: Workbook, client_id: int) -> None:
                 ", ".join(flag_display_name(f) for f in deserialize_flags(r.flags)),
                 "Yes" if r.needs_review else "",
             ])
-    ws.auto_filter.ref = ws.dimensions
+    # Autofilter covers the header and data rows only (not the banner).
+    header_letter = get_column_letter(1)
+    last_letter = get_column_letter(len(headers))
+    last_row = ws.max_row
+    ws.auto_filter.ref = f"{header_letter}{header_row}:{last_letter}{last_row}"
     _autosize(ws, len(headers))
 
 
-def _category_totals_sheet(wb: Workbook, report: AffordabilityReport) -> None:
+def _category_totals_sheet(wb: Workbook, report: AffordabilityReport,
+                           client_name: str, reference: str | None) -> None:
     ws = wb.create_sheet("Category Totals")
-    headers = ["Category", "Group", "Count", "Total (GBP)", "Monthly avg (GBP)"]
-    _write_header(ws, headers)
+    header_row = _write_client_banner(ws, client_name, reference)
+    headers = ["Client", "Category", "Group", "Count", "Total (GBP)", "Monthly avg (GBP)"]
+    _write_header(ws, headers, start_row=header_row)
     months = max(report.months_in_window, 1.0)
     for cat in list(COMMITTED_CATEGORIES) + list(DISCRETIONARY_CATEGORIES):
         t = report.per_category.get(cat)
         if t is None:
-            ws.append([cat, "", 0, 0.0, 0.0])
+            ws.append([client_name, cat, "", 0, 0.0, 0.0])
             continue
         ws.append([
+            client_name,
             t.category,
             t.group,
             t.count,
@@ -193,8 +217,8 @@ def export_client_workbook(client_id: int, out_path: Path,
     # Remove default sheet
     default = wb.active
     wb.remove(default)
-    _transactions_sheet(wb, client_id)
-    _category_totals_sheet(wb, report)
+    _transactions_sheet(wb, client_id, client.display_name, client.reference)
+    _category_totals_sheet(wb, report, client.display_name, client.reference)
     _affordability_sheet(wb, report, client.display_name)
     _audit_sheet(wb, client, user_label)
     wb.save(str(out_path))

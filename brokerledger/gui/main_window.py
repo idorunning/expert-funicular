@@ -244,15 +244,19 @@ class MainWindow(QMainWindow):
             detail._export()
 
     def _update_busy_indicator(self, _state: bool = False) -> None:
-        active = [
-            v.client_name for v in self._details.values() if v.is_processing()
+        busy_ids: set[int] = {
+            cid for cid, v in self._details.items() if v.is_processing()
+        }
+        active_names = [
+            v.client_name for cid, v in self._details.items() if cid in busy_ids
         ]
-        if not active:
+        self.clients.set_processing_clients(busy_ids)
+        if not active_names:
             self.statusBar().clearMessage()
             return
-        if len(active) == 1:
-            self.statusBar().showMessage(f"⏳ Background processing: {active[0]}")
+        if len(active_names) == 1:
+            self.statusBar().showMessage(f"⏳ Background processing: {active_names[0]}")
         else:
             self.statusBar().showMessage(
-                f"⏳ Background processing for {len(active)} clients"
+                f"⏳ Background processing for {len(active_names)} clients"
             )

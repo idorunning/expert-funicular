@@ -1,7 +1,7 @@
 """Clients list + "new client" dialog + management menu."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -39,6 +39,9 @@ from ..clients.service import (
 )
 from ..users import service as users_service
 from .greetings import greeting_for, random_quote
+
+
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 class NewClientDialog(QDialog):
@@ -125,6 +128,15 @@ class ReassignDialog(QDialog):
         return int(data) if data is not None else None
 
 
+# Column indexes — single source of truth.
+_COL_SPINNER = 0
+_COL_NAME = 1
+_COL_REFERENCE = 2
+_COL_CREATED = 3
+_COL_STATUS = 4
+_COL_ID = 5
+
+
 class ClientsView(QWidget):
     open_client = Signal(int, str)   # (client_id, name)
     logout_requested = Signal()
@@ -200,13 +212,26 @@ class ClientsView(QWidget):
         layout.addLayout(toolbar)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["Name", "Reference", "Created", "Status", "ID"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(
+            ["", "Name", "Reference", "Created", "Status", "ID"]
+        )
+        header_view = self.table.horizontalHeader()
+        header_view.setSectionsClickable(True)
+        header_view.setSectionsMovable(True)  # reorderable columns (drag header)
+        header_view.setSortIndicatorShown(True)
+        header_view.setSectionResizeMode(_COL_SPINNER, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(_COL_SPINNER, 28)
+        header_view.setSectionResizeMode(_COL_NAME, QHeaderView.ResizeMode.Stretch)
+        header_view.setSectionResizeMode(_COL_REFERENCE, QHeaderView.ResizeMode.Interactive)
+        header_view.setSectionResizeMode(_COL_CREATED, QHeaderView.ResizeMode.ResizeToContents)
+        header_view.setSectionResizeMode(_COL_STATUS, QHeaderView.ResizeMode.ResizeToContents)
+        header_view.setSectionResizeMode(_COL_ID, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setAlternatingRowColors(True)
+        self.table.setSortingEnabled(True)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
         self.table.cellDoubleClicked.connect(self._open_selected)
@@ -227,6 +252,29 @@ class ClientsView(QWidget):
         layout.addLayout(bottom)
 
         self._records: list[ClientRecord] = []
+        self._processing_ids: set[int] = set()
+        self._spinner_frame = 0
+        self._spinner_timer = QTimer(self)
+        self._spinner_timer.setInterval(120)
+        self._spinner_timer.timeout.connect(self._tick_spinner)
+
+    # ---- public API -----------------------------------------------------
+
+    def set_processing_clients(self, ids: set[int]) -> None:
+        """Called by the main window when workers start/stop.
+
+        ``ids`` is the current set of client ids with background work in
+        flight. Updates the spinner column in place (no full refresh, so
+        sort order and selection are preserved).
+        """
+        self._processing_ids = set(ids)
+        if self._processing_ids and not self._spinner_timer.isActive():
+            self._spinner_timer.start()
+        elif not self._processing_ids and self._spinner_timer.isActive():
+            self._spinner_timer.stop()
+        self._repaint_spinner_column()
+
+    # ---- rendering ------------------------------------------------------
 
     def refresh(self) -> None:
         cu = get_current()
@@ -261,16 +309,14 @@ class ClientsView(QWidget):
                 if needle in r.display_name.lower()
                 or (r.reference or "").lower().find(needle) >= 0
             ]
+        # Rebuilding the table removes cell widgets; disable sorting while we
+        # populate so row indexes stay stable, then re-enable.
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
         for idx, c in enumerate(rows):
-            self.table.setItem(idx, 0, QTableWidgetItem(c.display_name))
-            self.table.setItem(idx, 1, QTableWidgetItem(c.reference or ""))
-            self.table.setItem(idx, 2, QTableWidgetItem(c.created_at.strftime("%Y-%m-%d")))
-            status = "archived" if c.archived_at else "active"
-            self.table.setItem(idx, 3, QTableWidgetItem(status))
-            id_item = QTableWidgetItem(str(c.id))
-            id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(idx, 4, id_item)
+            self._populate_row(idx, c)
+        self.table.setSortingEnabled(True)
+        self._repaint_spinner_column()
         hint = "Double-click to open, or right-click for more actions."
         self.status_label.setText(
             f"{len(rows)} of {len(self._records)} client(s) shown"
@@ -278,18 +324,119 @@ class ClientsView(QWidget):
             + f"  ·  {hint}"
         )
 
+    def _populate_row(self, row: int, c: ClientRecord) -> None:
+        # Spinner (empty; filled in _repaint_spinner_column when busy).
+        spinner_item = QTableWidgetItem("")
+        spinner_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        spinner_item.setFlags(spinner_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        self.table.setItem(row, _COL_SPINNER, spinner_item)
+
+        name_item = QTableWidgetItem(c.display_name)
+        self.table.setItem(row, _COL_NAME, name_item)
+
+        ref_item = QTableWidgetItem(c.reference or "")
+        self.table.setItem(row, _COL_REFERENCE, ref_item)
+
+        created_item = QTableWidgetItem(c.created_at.strftime("%Y-%m-%d"))
+        # ISO-format dates already sort lexicographically; no extra role needed.
+        self.table.setItem(row, _COL_CREATED, created_item)
+
+        # Status cell hosts a live combo box so archiving is one click.
+        status_text = "archived" if c.archived_at else "active"
+        status_item = QTableWidgetItem(status_text)
+        # Store the status text as the sort value so column sorts correctly
+        # even though the display widget covers the cell.
+        self.table.setItem(row, _COL_STATUS, status_item)
+        combo = QComboBox()
+        combo.addItem("Active")
+        combo.addItem("Archived")
+        combo.setCurrentIndex(1 if c.archived_at else 0)
+        # `client_id` is the anchor the slot uses to find the right record —
+        # row indexes shift when the user re-sorts the table.
+        cid = c.id
+        combo.currentIndexChanged.connect(
+            lambda new_idx, client_id=cid: self._on_status_changed(client_id, new_idx)
+        )
+        self.table.setCellWidget(row, _COL_STATUS, combo)
+
+        id_item = QTableWidgetItem()
+        id_item.setData(Qt.ItemDataRole.DisplayRole, c.id)  # numeric sort
+        id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.table.setItem(row, _COL_ID, id_item)
+
+    def _repaint_spinner_column(self) -> None:
+        frame_char = _SPINNER_FRAMES[self._spinner_frame % len(_SPINNER_FRAMES)]
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, _COL_SPINNER)
+            if item is None:
+                continue
+            cid = self._client_id_for_row(row)
+            if cid is not None and cid in self._processing_ids:
+                item.setText(frame_char)
+                item.setForeground(Qt.GlobalColor.darkMagenta)
+                item.setToolTip("Processing in the background…")
+            else:
+                item.setText("")
+                item.setToolTip("")
+
+    def _tick_spinner(self) -> None:
+        self._spinner_frame = (self._spinner_frame + 1) % len(_SPINNER_FRAMES)
+        self._repaint_spinner_column()
+
+    # ---- row helpers ---------------------------------------------------
+
+    def _client_id_for_row(self, row: int) -> int | None:
+        item = self.table.item(row, _COL_ID)
+        if item is None:
+            return None
+        data = item.data(Qt.ItemDataRole.DisplayRole)
+        try:
+            return int(data)
+        except (TypeError, ValueError):
+            return None
+
+    def _record_for_id(self, client_id: int) -> ClientRecord | None:
+        for r in self._records:
+            if r.id == client_id:
+                return r
+        return None
+
     def _selected_record(self) -> ClientRecord | None:
         row = self.table.currentRow()
         if row < 0:
             return None
-        try:
-            cid = int(self.table.item(row, 4).text())
-        except (AttributeError, ValueError):
+        cid = self._client_id_for_row(row)
+        if cid is None:
             return None
-        for r in self._records:
-            if r.id == cid:
-                return r
-        return None
+        return self._record_for_id(cid)
+
+    # ---- status combo slot ---------------------------------------------
+
+    def _on_status_changed(self, client_id: int, new_index: int) -> None:
+        rec = self._record_for_id(client_id)
+        if rec is None:
+            return
+        archived_now = rec.archived_at is not None
+        wants_archived = new_index == 1
+        if wants_archived == archived_now:
+            return
+        try:
+            if wants_archived:
+                if QMessageBox.question(
+                    self, "Archive client",
+                    f"Archive '{rec.display_name}'? It will be hidden until you toggle 'Show archived'.",
+                ) != QMessageBox.StandardButton.Yes:
+                    # Revert the combo — refresh puts it back in sync.
+                    self.refresh()
+                    return
+                archive_client(client_id)
+            else:
+                restore_client(client_id)
+        except ClientError as e:
+            QMessageBox.warning(self, "Status change failed", str(e))
+        self.refresh()
+
+    # ---- context menu --------------------------------------------------
 
     def _context_menu(self, pos) -> None:
         row = self.table.indexAt(pos).row()
@@ -397,14 +544,23 @@ class ClientsView(QWidget):
         rec = self._selected_record()
         if rec is None:
             return
-        typed, ok = QInputDialog.getText(
-            self, "Delete client",
-            f"Type the client name '{rec.display_name}' to confirm deletion. "
-            "All statements and transactions will be removed.",
+        cu = get_current()
+        if cu is None or cu.role != "admin":
+            QMessageBox.warning(
+                self, "Admins only",
+                "Only administrators can delete clients.",
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete client?",
+            f"Delete '{rec.display_name}'?\n\n"
+            "All statements and transactions for this client will be removed. "
+            "This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        if not ok or typed.strip() != rec.display_name:
-            if ok:
-                QMessageBox.information(self, "Not deleted", "Name did not match — nothing deleted.")
+        if reply != QMessageBox.StandardButton.Yes:
             return
         try:
             delete_client(rec.id)
