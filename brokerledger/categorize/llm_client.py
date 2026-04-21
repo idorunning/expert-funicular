@@ -38,6 +38,7 @@ class LLMClient(ABC):
         direction: str,
         posted_date: str,
         few_shot: list[FewShotExample],
+        web_hint: str | None = None,
     ) -> LLMResult: ...
 
 
@@ -98,15 +99,13 @@ class OllamaClient(LLMClient):
         direction: str,
         posted_date: str,
         few_shot: list[FewShotExample],
+        web_hint: str | None = None,
     ) -> LLMResult:
         system = build_system_prompt()
         user = build_user_prompt(description_raw, merchant_normalized, amount, direction, posted_date, few_shot)
 
-        # Opt-in merchant web lookup. When disabled this is a no-op and
-        # no outbound network request is made. Only the normalised merchant
-        # name is ever sent — see brokerledger.categorize.web_lookup.
-        from .web_lookup import lookup_merchant
-        web_hint = lookup_merchant(merchant_normalized)
+        # Caller-supplied web lookup hint. We no longer fire the DuckDuckGo
+        # lookup unconditionally — the pipeline decides when to pass one.
         if web_hint:
             user = user + f"\n\nWeb lookup hint for merchant (public info only):\n{web_hint}"
 
@@ -129,9 +128,19 @@ class OllamaClient(LLMClient):
 
         text = data.get("response", "").strip()
         result = _parse_llm_json(text)
-        # Capture native thinking trace when the model supports it (Ollama returns
-        # a "thinking" key alongside "response" when think=True is honoured).
-        result.thinking = data.get("thinking", "") or ""
+        # Prefer the JSON body's thinking; fall back to Ollama's native
+        # envelope (populated when think=True is honoured by the model).
+        if not result.thinking:
+            result.thinking = data.get("thinking", "") or ""
+        logger.info(
+            "LLM classify model={} merchant={!r} cat={!r} conf={:.2f} hint={} think={!r}",
+            self.model,
+            (merchant_normalized or description_raw)[:40],
+            result.category,
+            result.confidence,
+            "yes" if web_hint else "no",
+            (result.thinking or "")[:80],
+        )
         return result
 
 
@@ -154,6 +163,12 @@ def _parse_llm_json(text: str) -> LLMResult:
         # Accept case-insensitive match (models sometimes return "food" / "FOOD").
         cat_lo = cat.lower()
         matched = next((v for v in valid if v.lower() == cat_lo), None)
+        if matched is None and "::" in cat:
+            # Model sometimes returns "group :: Category" from the taxonomy examples.
+            # Extract the right-hand part and try again.
+            tail = cat.split("::")[-1].strip()
+            tail_lo = tail.lower()
+            matched = next((v for v in valid if v.lower() == tail_lo), None)
         if matched is None:
             raise LLMError(f"LLM returned invalid category: {cat!r}")
         cat = matched
@@ -167,7 +182,8 @@ def _parse_llm_json(text: str) -> LLMResult:
     except (TypeError, ValueError):
         conf_f = 0.0
     reason = str(obj.get("reason", ""))[:200]
-    return LLMResult(category=cat, group=grp, confidence=conf_f, reason=reason)
+    thinking = str(obj.get("thinking", ""))[:2000]
+    return LLMResult(category=cat, group=grp, confidence=conf_f, reason=reason, thinking=thinking)
 
 
 class FakeLLMClient(LLMClient):
@@ -217,6 +233,7 @@ class FakeLLMClient(LLMClient):
         direction: str,
         posted_date: str,
         few_shot: list[FewShotExample],
+        web_hint: str | None = None,
     ) -> LLMResult:
         # Few-shot wins deterministically.
         for ex in few_shot:

@@ -84,7 +84,9 @@ def lookup_merchant(merchant: str) -> str | None:
         return None
     abstract = (data.get("AbstractText") or data.get("Heading") or "").strip()
     if not abstract:
+        logger.info("Web lookup for {!r} returned no abstract", query)
         return None
     if len(abstract) > _MAX_ABSTRACT_CHARS:
         abstract = abstract[: _MAX_ABSTRACT_CHARS - 1].rstrip() + "…"
+    logger.info("Web lookup for {!r}: {:.80s}", query, abstract)
     return abstract

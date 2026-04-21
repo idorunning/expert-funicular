@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...categorize.taxonomy import user_visible_categories
+from ...categorize.taxonomy import includes_for, user_visible_categories
 
 
 class CategoryDelegate(QStyledItemDelegate):
@@ -25,6 +25,13 @@ class CategoryDelegate(QStyledItemDelegate):
         combo.setMaxVisibleItems(22)
         for cat in user_visible_categories():
             combo.addItem(cat)
+            hint = includes_for(cat)
+            if hint:
+                combo.setItemData(
+                    combo.count() - 1,
+                    f"{cat}\n\n{hint}",
+                    Qt.ItemDataRole.ToolTipRole,
+                )
         # Open the dropdown the moment the editor appears.
         combo.showPopup()
         # Commit immediately when the user picks a value — no extra click needed.

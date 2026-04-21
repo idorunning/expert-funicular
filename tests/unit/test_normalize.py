@@ -32,3 +32,23 @@ def test_empty_input():
 def test_capping_length():
     got = normalize_merchant("A" * 200)
     assert len(got) <= 60
+
+
+def test_pocket_money_preserved_as_strong_token():
+    assert normalize_merchant("POCKET MONEY") == "POCKET MONEY"
+
+
+def test_allowance_preserved_as_strong_token():
+    assert normalize_merchant("ALLOWANCE").startswith("ALLOWANCE")
+
+
+def test_empty_fallback_uses_raw_description():
+    # An input whose only meaningful bytes would otherwise be scrubbed
+    # to empty should fall back to an uppercase collapsed copy so the
+    # merchant register has a non-empty key to learn from. Previously
+    # all such rows collided on "".
+    got = normalize_merchant("ref: 99999999999")
+    assert got  # non-empty
+    # Even zero-signal descriptions end up with *some* key rather than "".
+    # (The content can be either the preserved raw or a reasonable tail;
+    # the important invariant is non-emptiness.)

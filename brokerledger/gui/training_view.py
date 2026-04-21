@@ -7,7 +7,7 @@ the rest of the app. All actual writes are delegated to
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -42,12 +42,10 @@ QLabel#TrainingTitle {
     font-size: 22px;
     font-weight: 700;
     color: #D63A91;
-    letter-spacing: 1px;
 }
 QLabel#TrainingSubtitle {
     color: #9C8FB5;
     font-size: 12px;
-    letter-spacing: 0.5px;
 }
 QFrame#StatusCard, QFrame#LearningsCard, QFrame#NotePanel {
     background-color: #130E24;
@@ -63,8 +61,6 @@ QLabel#StatusNumber {
 QLabel#StatusLabel {
     color: #9C8FB5;
     font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
 }
 QTableWidget {
     background-color: #130E24;
@@ -160,7 +156,10 @@ class TrainingView(QWidget):
         title_col.setSpacing(2)
         title = QLabel("◉ AI TRAINING ZONE")
         title.setObjectName("TrainingTitle")
-        subtitle = QLabel("Review the AI's reasoning. Guide it. Train. Improve.")
+        subtitle = QLabel(
+            "Teach the AI client-specific mappings that general knowledge "
+            "can't infer."
+        )
         subtitle.setObjectName("TrainingSubtitle")
         title_col.addWidget(title)
         title_col.addWidget(subtitle)
@@ -222,8 +221,7 @@ class TrainingView(QWidget):
         panel_layout.setSpacing(8)
 
         self.detail_title = QLabel("Select a pending note")
-        tf = QFont(); tf.setPointSize(12); tf.setBold(True)
-        self.detail_title.setFont(tf)
+        self.detail_title.setStyleSheet("color: #D63A91; font-size: 14px; font-weight: bold;")
         self.detail_title.setStyleSheet("color: #D63A91;")
         panel_layout.addWidget(self.detail_title)
 
@@ -467,11 +465,17 @@ class TrainingView(QWidget):
                    if report.skipped_no_category else "")
             )
             return
+        siblings_line = (
+            f"<br><b>{report.siblings_updated}</b> other transaction(s) "
+            "re-categorised to match."
+            if report.siblings_updated else ""
+        )
         QMessageBox.information(
             self, "Training complete",
             f"<b>{report.notes_processed}</b> note(s) applied.<br>"
             f"<b>{report.rules_created}</b> new rule(s) created, "
             f"<b>{report.rules_updated}</b> existing rule(s) reinforced."
+            f"{siblings_line}"
         )
 
     def _on_training_error(self, message: str) -> None:

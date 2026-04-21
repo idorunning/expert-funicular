@@ -173,6 +173,51 @@ def _decide(
             needs_review=True,
         ))
 
+    # 3b. Conditional web-lookup fallback — only when the first pass gave up
+    # (low confidence OR landed on a generic bucket) AND the admin has
+    # opted into merchant web lookup. Fires at most once per transaction.
+    from . import web_lookup
+    GENERIC_CATEGORIES = {"Other", "Other income"}
+    fallback_threshold = settings.llm_web_fallback_threshold
+    thinking_combined = getattr(out, "thinking", "") or ""
+    web_reason_suffix = ""
+    if (
+        web_lookup.is_enabled()
+        and (
+            (out.confidence or 0.0) < fallback_threshold
+            or out.category in GENERIC_CATEGORIES
+        )
+    ):
+        hint = web_lookup.lookup_merchant(merchant)
+        if hint:
+            logger.info("web fallback firing for {!r} (conf={:.2f} cat={!r})",
+                        merchant, out.confidence or 0.0, out.category)
+            try:
+                retry = llm.classify(
+                    description_raw=description_raw,
+                    merchant_normalized=merchant,
+                    amount=amount,
+                    direction=direction,
+                    posted_date=posted_date,
+                    few_shot=few_shot,
+                    web_hint=hint,
+                )
+            except LLMError as e:
+                logger.warning("web-fallback retry failed: {}", e)
+            else:
+                if (retry.confidence or 0.0) > (out.confidence or 0.0):
+                    logger.info(
+                        "web fallback promoted {!r}: {:.2f} {!r} -> {:.2f} {!r}",
+                        merchant, out.confidence or 0.0, out.category,
+                        retry.confidence or 0.0, retry.category,
+                    )
+                    thinking_combined = (
+                        (thinking_combined + "\n[after web] " if thinking_combined else "")
+                        + (getattr(retry, "thinking", "") or "")
+                    )
+                    out = retry
+                    web_reason_suffix = " [web-assisted]"
+
     # 4. Flag-for-review logic.
     fuzzy_low = get_threshold("fuzzy_low")
     fuzzy_high = get_threshold("fuzzy_high")
@@ -190,9 +235,9 @@ def _decide(
         group=out.group,
         confidence=out.confidence,
         source=source,
-        reason=out.reason,
+        reason=out.reason + web_reason_suffix,
         needs_review=needs_review,
-        thinking=getattr(out, "thinking", "") or "",
+        thinking=thinking_combined,
     ))
 
 
