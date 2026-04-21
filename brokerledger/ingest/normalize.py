@@ -59,6 +59,16 @@ _STRONG_TOKENS = (
     "TV LICENCE",
     "TV LICENSING",
     "THAMES WATER",
+    # Household / child-related low-signal descriptions that would otherwise
+    # be scrubbed to an empty string by the cleanup pipeline. Preserving them
+    # gives the merchant-rule register and the LLM a stable key to learn from.
+    "POCKET MONEY",
+    "ALLOWANCE",
+    "SCHOOL FEES",
+    "SCHOOL MEALS",
+    "TUITION",
+    "NURSERY FEES",
+    "CHILDMINDER",
     # Gambling brands — many contain digits or no spaces, so protect them from
     # the punctuation/digit scrub and give the fuzzy matcher a clean target.
     "BET365",
@@ -138,6 +148,15 @@ def normalize_merchant(description: str) -> str:
 
     if is_p2p and _P2P_TAG not in s:
         s = (s + " " + _P2P_TAG).strip() if s else _P2P_TAG
+
+    # Empty-fallback: if every transform stripped the description to nothing,
+    # fall back to an uppercased whitespace-collapsed copy of the raw input so
+    # the merchant-rule register has a non-empty key. Otherwise every low-
+    # signal description would collide on "" and a broker's training wouldn't
+    # stick.
+    if not s:
+        fallback = _WHITESPACE_RE.sub(" ", description.upper()).strip()
+        s = fallback[:_MAX_LEN].rstrip()
 
     if len(s) > _MAX_LEN:
         s = s[:_MAX_LEN].rstrip()

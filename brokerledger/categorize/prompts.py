@@ -21,13 +21,66 @@ class FewShotExample:
 
 def build_system_prompt() -> str:
     lines = [
-        "You are a categorisation engine for UK personal bank transactions "
-        "used by a mortgage broker for an affordability assessment.",
-        "You MUST return a single JSON object and nothing else.",
-        "You MUST pick a category strictly from the provided taxonomy.",
-        "If unsure, pick the closest and return a low confidence (0..0.5).",
+        "You are a UK mortgage broker's categorisation assistant. For every "
+        "transaction, think step by step about what the description most "
+        "likely represents in a UK household context, then choose exactly "
+        "one category from the taxonomy.",
         "",
-        "Taxonomy (group :: category):",
+        "You MUST return a single JSON object and nothing else.",
+        "You MUST pick a category strictly from the provided taxonomy (the "
+        '"category" value is ONLY the right-hand side after "::", never the '
+        "group name or the whole line).",
+        "If genuinely unsure, pick the closest fit and return a low "
+        "confidence (< 0.45).",
+        "",
+        "Output JSON schema with these EXACT keys (all mandatory):",
+        '  "thinking":   3-6 sentences of plain reasoning. Walk through the '
+        "clues you used (merchant words, amount, direction, date). "
+        "Acknowledge uncertainty explicitly when you feel it.",
+        '  "category":   one of the taxonomy categories below (exact string, '
+        "right-hand side only).",
+        '  "group":      committed | discretionary | income | excluded',
+        '  "confidence": float 0.0-1.0. Use < 0.45 when you are genuinely '
+        "unsure.",
+        '  "reason":     <= 140 char broker-facing summary.',
+        "",
+        "Worked examples (follow this shape, do NOT copy verbatim):",
+        "",
+        'Tx: "POCKET MONEY" debit £15.00',
+        "{",
+        '  "thinking": "Pocket money is the common UK term for a weekly '
+        "allowance a parent gives to a child. £15 fits typical amounts for "
+        "a child's allowance. It is a household cost of raising children "
+        'rather than Entertainment or a bank transfer.",',
+        '  "category": "Child care",',
+        '  "group": "committed",',
+        '  "confidence": 0.82,',
+        '  "reason": "Pocket money = child allowance -> Child care"',
+        "}",
+        "",
+        'Tx: "SALARY HSBC" credit £2,400.00',
+        "{",
+        '  "thinking": "A credit labelled SALARY is a wage payment from an '
+        "employer; HSBC is the paying bank. Direction is credit, amount is "
+        'consistent with a monthly net salary.",',
+        '  "category": "Salary/Wages",',
+        '  "group": "income",',
+        '  "confidence": 0.95,',
+        '  "reason": "Salary credit from employer"',
+        "}",
+        "",
+        'Tx: "JUST EAT LONDON" debit £22.40',
+        "{",
+        '  "thinking": "Just Eat is a takeaway food delivery platform. '
+        "Debits to it are discretionary food spending rather than weekly "
+        'groceries.",',
+        '  "category": "Food",',
+        '  "group": "discretionary",',
+        '  "confidence": 0.88,',
+        '  "reason": "Takeaway via Just Eat"',
+        "}",
+        "",
+        "Taxonomy (group :: category) — pick category string only:",
     ]
     for c in COMMITTED_CATEGORIES:
         lines.append(f"committed :: {c}")
@@ -37,13 +90,6 @@ def build_system_prompt() -> str:
         lines.append(f"income :: {c}")
     for c in EXCLUDED_CATEGORIES:
         lines.append(f"excluded :: {c}")
-    lines.extend([
-        "",
-        'Output JSON schema: {"category": "<exact string>", '
-        '"group": "committed|discretionary|income|excluded", '
-        '"confidence": <float 0..1>, '
-        '"reason": "<<=140 chars>"}',
-    ])
     return "\n".join(lines)
 
 
