@@ -154,6 +154,12 @@ def _parse_llm_json(text: str) -> LLMResult:
         # Accept case-insensitive match (models sometimes return "food" / "FOOD").
         cat_lo = cat.lower()
         matched = next((v for v in valid if v.lower() == cat_lo), None)
+        if matched is None and "::" in cat:
+            # Model sometimes returns "group :: Category" from the taxonomy examples.
+            # Extract the right-hand part and try again.
+            tail = cat.split("::")[-1].strip()
+            tail_lo = tail.lower()
+            matched = next((v for v in valid if v.lower() == tail_lo), None)
         if matched is None:
             raise LLMError(f"LLM returned invalid category: {cat!r}")
         cat = matched

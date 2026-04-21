@@ -7,7 +7,7 @@ the rest of the app. All actual writes are delegated to
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -42,12 +42,10 @@ QLabel#TrainingTitle {
     font-size: 22px;
     font-weight: 700;
     color: #D63A91;
-    letter-spacing: 1px;
 }
 QLabel#TrainingSubtitle {
     color: #9C8FB5;
     font-size: 12px;
-    letter-spacing: 0.5px;
 }
 QFrame#StatusCard, QFrame#LearningsCard, QFrame#NotePanel {
     background-color: #130E24;
@@ -63,8 +61,6 @@ QLabel#StatusNumber {
 QLabel#StatusLabel {
     color: #9C8FB5;
     font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
 }
 QTableWidget {
     background-color: #130E24;
@@ -222,8 +218,7 @@ class TrainingView(QWidget):
         panel_layout.setSpacing(8)
 
         self.detail_title = QLabel("Select a pending note")
-        tf = QFont(); tf.setPointSize(12); tf.setBold(True)
-        self.detail_title.setFont(tf)
+        self.detail_title.setStyleSheet("color: #D63A91; font-size: 14px; font-weight: bold;")
         self.detail_title.setStyleSheet("color: #D63A91;")
         panel_layout.addWidget(self.detail_title)
 
