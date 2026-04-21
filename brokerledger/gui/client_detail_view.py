@@ -1,0 +1,1070 @@
+"""Client detail view — import drop zone + affordability summary + actions."""
+from __future__ import annotations
+
+import json
+import shutil
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+from PySide6.QtCore import QDate, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QComboBox,
+    QDateEdit,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from sqlalchemy import func, select
+
+from ..affordability.calculator import compute_for_client
+from ..auth.session import get_current
+from ..clients.service import ClientError, count_flagged_transactions, get_client, verify_statement
+from ..db.engine import session_scope
+from ..db.models import AuditLog, Statement, Transaction, User
+from ..categorize.taxonomy import (
+    COMMITTED_CATEGORIES,
+    DISCRETIONARY_CATEGORIES,
+    EXCLUDED_CATEGORIES,
+    GROUP_EXCLUDED,
+    GROUP_INCOME,
+    INCOME_CATEGORIES,
+    group_of,
+)
+from ..export.csv import export_transactions_csv
+from ..export.xlsx import export_client_workbook
+from .theme import BRAND_MAGENTA, BRAND_PURPLE_SOFT, SUCCESS
+from .widgets.dropzone import DropZone
+from .workers.ingest_worker import run_ingest_in_thread
+from .workers.recategorize_worker import run_recategorize_in_thread
+
+
+_ALL_CATEGORIES: tuple[str, ...] = tuple(
+    list(COMMITTED_CATEGORIES)
+    + list(DISCRETIONARY_CATEGORIES)
+    + list(INCOME_CATEGORIES)
+    + list(EXCLUDED_CATEGORIES)
+)
+
+
+def _months_ago(anchor: date, months: int) -> date:
+    year = anchor.year
+    month = anchor.month - months
+    while month <= 0:
+        month += 12
+        year -= 1
+    # Clamp day to last-of-month if the original day is out of range.
+    day = anchor.day
+    while True:
+        try:
+            return date(year, month, day)
+        except ValueError:
+            day -= 1
+
+
+class ClientDetailView(QWidget):
+    back_requested = Signal()
+    review_requested = Signal()
+    processing_changed = Signal(bool)
+    tx_persisted = Signal(int, int)  # (client_id, tx_id) — forwarded from workers for live Review updates
+    # Emitted after ingest / re-categorisation when at least one transaction
+    # needs human review. Carries the flagged count.
+    review_flagged_requested = Signal(int)
+
+    def __init__(self, client_id: int, client_name: str) -> None:
+        super().__init__()
+        self.client_id = client_id
+        self.client_name = client_name
+        self._thread: QThread | None = None
+        self._worker = None
+        self._recategorize_thread: QThread | None = None
+        self._recategorize_worker = None
+        self._pending_paths: list[Path] = []
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(scroll)
+
+        body = QWidget()
+        scroll.setWidget(body)
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(20, 16, 20, 20)
+        layout.setSpacing(12)
+
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        self.back_btn = QPushButton("← Clients")
+        self.back_btn.clicked.connect(self.back_requested.emit)
+        header.addWidget(self.back_btn)
+        header.addStretch(1)
+        title_label = QLabel(client_name)
+        title_label.setStyleSheet(
+            "QLabel { font-size: 22px; font-weight: 600; color: #1F1030; }"
+        )
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.addWidget(title_label)
+        header.addStretch(1)
+        layout.addLayout(header)
+
+        self.notice = QLabel("")
+        self.notice.setWordWrap(True)
+        self.notice.setVisible(False)
+        self.notice.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        self.notice.linkActivated.connect(self._on_notice_link)
+        layout.addWidget(self.notice)
+
+        self.dropzone = DropZone()
+        self.dropzone.files_dropped.connect(self._on_files_queued)
+        layout.addWidget(self.dropzone)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        browse = QPushButton("Browse files…")
+        browse.clicked.connect(self._browse)
+        actions.addWidget(browse)
+        self.clear_btn = QPushButton("Clear queue")
+        self.clear_btn.setObjectName("GhostButton")
+        self.clear_btn.clicked.connect(self._clear_queue)
+        self.clear_btn.setEnabled(False)
+        actions.addWidget(self.clear_btn)
+        self.process_btn = QPushButton("Process queued files")
+        self.process_btn.clicked.connect(self._process_queue)
+        self.process_btn.setEnabled(False)
+        actions.addWidget(self.process_btn)
+        actions.addStretch(1)
+        review = QPushButton("Review transactions →")
+        review.clicked.connect(self.review_requested.emit)
+        actions.addWidget(review)
+        layout.addLayout(actions)
+
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        self.progress.setMinimumHeight(22)
+        self.progress.setFormat("  %p%")
+        self.progress.setTextVisible(True)
+        layout.addWidget(self.progress)
+
+        self.progress_label = QLabel("")
+        self.progress_label.setVisible(False)
+        self.progress_label.setWordWrap(True)
+        layout.addWidget(self.progress_label)
+
+        self.file_log = QListWidget()
+        self.file_log.setMaximumHeight(160)
+        layout.addWidget(self.file_log)
+        self._queue_items: dict[str, QListWidgetItem] = {}
+
+        layout.addWidget(self._build_statements_panel())
+        layout.addWidget(self._build_affordability_panel())
+        layout.addStretch(1)
+
+        self.refresh()
+        self._refresh_statements_table()
+
+    def _build_statements_panel(self) -> QGroupBox:
+        group = QGroupBox("Statements")
+        outer = QVBoxLayout(group)
+        outer.setContentsMargins(12, 18, 12, 12)
+        outer.setSpacing(8)
+
+        hint = QLabel(
+            "Each statement can be marked as verified once all flagged transactions "
+            "have been reviewed."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #6B6679;")
+        outer.addWidget(hint)
+
+        self.statements_table = QTableWidget()
+        self.statements_table.setColumnCount(6)
+        self.statements_table.setHorizontalHeaderLabels(
+            ["Imported", "File", "Rows", "Flagged", "Status", ""]
+        )
+        header = self.statements_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.statements_table.verticalHeader().setVisible(False)
+        self.statements_table.setAlternatingRowColors(True)
+        self.statements_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.statements_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.statements_table.setMinimumHeight(120)
+        outer.addWidget(self.statements_table)
+
+        self.statements_empty = QLabel(
+            "<i>No statements imported yet. Drop a file above to begin.</i>"
+        )
+        self.statements_empty.setStyleSheet("color: #6B6679;")
+        self.statements_empty.setVisible(False)
+        outer.addWidget(self.statements_empty)
+
+        return group
+
+    def _load_statements(self) -> list[dict]:
+        with session_scope() as s:
+            stmts = s.execute(
+                select(Statement)
+                .where(Statement.client_id == self.client_id)
+                .order_by(Statement.imported_at.desc())
+            ).scalars().all()
+            rows: list[dict] = []
+            for st in stmts:
+                flagged = int(
+                    s.execute(
+                        select(func.count()).select_from(Transaction).where(
+                            Transaction.statement_id == st.id,
+                            Transaction.needs_review == 1,
+                        )
+                    ).scalar_one()
+                )
+                verifier_name: str | None = None
+                if st.verified_by is not None:
+                    u = s.get(User, st.verified_by)
+                    verifier_name = u.username if u else None
+                rows.append({
+                    "id": st.id,
+                    "imported_at": st.imported_at,
+                    "original_name": st.original_name,
+                    "row_count": st.row_count,
+                    "flagged": flagged,
+                    "verified_at": st.verified_at,
+                    "verified_by_username": verifier_name,
+                })
+            return rows
+
+    def _refresh_statements_table(self) -> None:
+        rows = self._load_statements()
+        self.statements_table.setRowCount(len(rows))
+        self.statements_empty.setVisible(not rows)
+        self.statements_table.setVisible(bool(rows))
+        for idx, row in enumerate(rows):
+            imported = row["imported_at"]
+            imported_text = imported.strftime("%Y-%m-%d %H:%M") if imported else "—"
+            name_item = QTableWidgetItem(row["original_name"])
+            name_item.setToolTip(row["original_name"])
+            rows_text = str(row["row_count"]) if row["row_count"] is not None else "—"
+            flagged = row["flagged"]
+            flagged_item = QTableWidgetItem(str(flagged))
+            flagged_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            if flagged:
+                flagged_item.setForeground(QBrush(QColor("#A52D1E")))
+
+            if row["verified_at"] is not None:
+                stamp = row["verified_at"].strftime("%Y-%m-%d %H:%M")
+                who = row["verified_by_username"] or "—"
+                status_item = QTableWidgetItem(f"✓ Verified {stamp} · {who}")
+                status_item.setForeground(QBrush(QColor(SUCCESS)))
+            elif flagged > 0:
+                status_item = QTableWidgetItem("Review needed")
+                status_item.setForeground(QBrush(QColor("#A52D1E")))
+            else:
+                status_item = QTableWidgetItem("Ready to verify")
+                status_item.setForeground(QBrush(QColor("#6B6679")))
+
+            self.statements_table.setItem(idx, 0, QTableWidgetItem(imported_text))
+            self.statements_table.setItem(idx, 1, name_item)
+            rc_item = QTableWidgetItem(rows_text)
+            rc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.statements_table.setItem(idx, 2, rc_item)
+            self.statements_table.setItem(idx, 3, flagged_item)
+            self.statements_table.setItem(idx, 4, status_item)
+
+            if row["verified_at"] is None:
+                verify_btn = QPushButton("Verify ✓")
+                verify_btn.setEnabled(flagged == 0)
+                if flagged > 0:
+                    verify_btn.setToolTip(
+                        f"{flagged} transaction(s) still need review before you can verify."
+                    )
+                else:
+                    verify_btn.setToolTip("Mark this statement as reviewed and complete.")
+                verify_btn.clicked.connect(
+                    lambda _checked=False, sid=row["id"]: self._on_verify_statement(sid)
+                )
+                self.statements_table.setCellWidget(idx, 5, verify_btn)
+            else:
+                self.statements_table.setCellWidget(idx, 5, QLabel(""))
+
+    def _on_verify_statement(self, statement_id: int) -> None:
+        try:
+            verify_statement(statement_id)
+        except ClientError as e:
+            QMessageBox.warning(self, "Cannot verify yet", str(e))
+            self._refresh_statements_table()
+            return
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Verify failed", str(e))
+            return
+        self._refresh_statements_table()
+
+    def _build_affordability_panel(self) -> QGroupBox:
+        group = QGroupBox("Affordability summary")
+        outer = QVBoxLayout(group)
+        outer.setContentsMargins(12, 18, 12, 12)
+        outer.setSpacing(10)
+
+        self.live_status = QLabel("")
+        self.live_status.setWordWrap(True)
+        self.live_status.setVisible(False)
+        outer.addWidget(self.live_status)
+
+        form = QFormLayout()
+        self.declared = QLineEdit()
+        self.declared.setPlaceholderText("Override declared income (optional)")
+        self.declared.editingFinished.connect(self.refresh)
+        form.addRow("Declared income", self.declared)
+
+        self.range_preset = QComboBox()
+        self.range_preset.addItems([
+            "All transactions",
+            "Last 3 months",
+            "Last 6 months",
+            "Last 12 months",
+            "Custom…",
+        ])
+        self.range_preset.currentIndexChanged.connect(self._on_range_preset_changed)
+        form.addRow("Date range", self.range_preset)
+
+        range_row = QHBoxLayout()
+        today = QDate.currentDate()
+        self.range_from = QDateEdit()
+        self.range_from.setCalendarPopup(True)
+        self.range_from.setDisplayFormat("yyyy-MM-dd")
+        self.range_from.setDate(today.addMonths(-3))
+        self.range_from.setEnabled(False)
+        self.range_from.dateChanged.connect(self._on_custom_range_changed)
+        self.range_to = QDateEdit()
+        self.range_to.setCalendarPopup(True)
+        self.range_to.setDisplayFormat("yyyy-MM-dd")
+        self.range_to.setDate(today)
+        self.range_to.setEnabled(False)
+        self.range_to.dateChanged.connect(self._on_custom_range_changed)
+        range_row.addWidget(self.range_from)
+        range_row.addWidget(QLabel("→"))
+        range_row.addWidget(self.range_to)
+        range_row.addStretch(1)
+        form.addRow("", self._wrap(range_row))
+        outer.addLayout(form)
+
+        grid = QFormLayout()
+        self.l_period = QLabel("—")
+        self.l_income = QLabel("—")
+        self.l_committed = QLabel("—")
+        self.l_discretionary = QLabel("—")
+        self.l_outgoings = QLabel("—")
+        self.l_net = QLabel("—")
+        self.l_monthly_income = QLabel("—")
+        self.l_monthly_net = QLabel("—")
+        grid.addRow("Period", self.l_period)
+        grid.addRow("Income (total)", self.l_income)
+        grid.addRow("Committed (total)", self.l_committed)
+        grid.addRow("Discretionary (total)", self.l_discretionary)
+        grid.addRow("Outgoings (total)", self.l_outgoings)
+        grid.addRow("Net disposable (total)", self.l_net)
+        grid.addRow("Monthly income", self.l_monthly_income)
+        grid.addRow("Monthly net disposable", self.l_monthly_net)
+        outer.addLayout(grid)
+
+        breakdown_label = QLabel("<b>Category breakdown</b>  "
+                                 "<span style='color:#6B6679'>— updates as categories are assigned</span>")
+        outer.addWidget(breakdown_label)
+
+        self.category_table = QTableWidget()
+        self.category_table.setColumnCount(4)
+        self.category_table.setHorizontalHeaderLabels(["Category", "Group", "Count", "Total"])
+        self.category_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.category_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.category_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.category_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.category_table.verticalHeader().setVisible(False)
+        self.category_table.setAlternatingRowColors(True)
+        self.category_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.category_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.category_table.setMinimumHeight(220)
+        outer.addWidget(self.category_table)
+
+        self._category_rows: dict[str, int] = {}
+        self._live_totals: dict[str, tuple[int, Decimal]] = {}
+        self._live_mode: bool = False
+        self._flash_timers: dict[int, QTimer] = {}
+        self._populate_category_rows()
+
+        buttons = QHBoxLayout()
+        recalculate_btn = QPushButton("Recalculate")
+        recalculate_btn.setToolTip("Recalculate affordability from current transaction categories")
+        recalculate_btn.clicked.connect(self.refresh)
+        buttons.addWidget(recalculate_btn)
+        self.recategorize_btn = QPushButton("Re-run category assignment")
+        self.recategorize_btn.setToolTip(
+            "Re-assign categories to all transactions (keeps your manual fixes)"
+        )
+        self.recategorize_btn.clicked.connect(self._start_recategorize)
+        buttons.addWidget(self.recategorize_btn)
+        self.review_btn = QPushButton("Review transactions →")
+        self.review_btn.setObjectName("GhostButton")
+        self.review_btn.clicked.connect(self.review_requested.emit)
+        buttons.addWidget(self.review_btn)
+        buttons.addStretch(1)
+        export_btn = QPushButton("Export…")
+        export_btn.setToolTip("Export to Excel, Google Sheets (CSV) or a plain text file")
+        export_btn.clicked.connect(self._export)
+        buttons.addWidget(export_btn)
+        outer.addLayout(buttons)
+
+        return group
+
+    def _populate_category_rows(self) -> None:
+        self.category_table.setRowCount(len(_ALL_CATEGORIES))
+        self._category_rows.clear()
+        for idx, cat in enumerate(_ALL_CATEGORIES):
+            self._category_rows[cat] = idx
+            name_item = QTableWidgetItem(cat)
+            group_item = QTableWidgetItem(group_of(cat))
+            count_item = QTableWidgetItem("0")
+            count_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            total_item = QTableWidgetItem("£0.00")
+            total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.category_table.setItem(idx, 0, name_item)
+            self.category_table.setItem(idx, 1, group_item)
+            self.category_table.setItem(idx, 2, count_item)
+            self.category_table.setItem(idx, 3, total_item)
+
+    def _wrap(self, inner_layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(inner_layout)
+        return w
+
+    def _active_date_range(self) -> tuple[date | None, date | None]:
+        idx = self.range_preset.currentIndex()
+        today = date.today()
+        if idx == 0:  # All
+            return None, None
+        if idx == 1:  # Last 3 months
+            return _months_ago(today, 3), today
+        if idx == 2:  # Last 6 months
+            return _months_ago(today, 6), today
+        if idx == 3:  # Last 12 months
+            return _months_ago(today, 12), today
+        # Custom
+        start = self.range_from.date().toPython()
+        end = self.range_to.date().toPython()
+        if end < start:
+            start, end = end, start
+        return start, end
+
+    def _on_range_preset_changed(self, idx: int) -> None:
+        is_custom = idx == 4
+        self.range_from.setEnabled(is_custom)
+        self.range_to.setEnabled(is_custom)
+        self.refresh()
+
+    def _on_custom_range_changed(self, _qdate) -> None:
+        if self.range_preset.currentIndex() == 4:
+            self.refresh()
+
+    def refresh(self) -> None:
+        declared = self._declared_income()
+        date_start, date_end = self._active_date_range()
+        report = compute_for_client(
+            self.client_id,
+            declared_income=declared,
+            date_start=date_start,
+            date_end=date_end,
+        )
+        if report.period_start and report.period_end:
+            self.l_period.setText(f"{report.period_start.isoformat()} → {report.period_end.isoformat()}")
+        else:
+            self.l_period.setText("—")
+        self.l_income.setText(f"£{report.income_total:,.2f}")
+        self.l_committed.setText(f"£{report.committed_total:,.2f}")
+        self.l_discretionary.setText(f"£{report.discretionary_total:,.2f}")
+        self.l_outgoings.setText(f"£{report.outgoings_total:,.2f}")
+        self.l_net.setText(f"£{report.net_disposable:,.2f}")
+        self.l_monthly_income.setText(f"£{report.monthly_income:,.2f}")
+        self.l_monthly_net.setText(f"£{report.monthly_net_disposable:,.2f}")
+        if not self._live_mode:
+            self._populate_breakdown_from_report(report)
+        if hasattr(self, "statements_table"):
+            self._refresh_statements_table()
+
+    def _populate_breakdown_from_report(self, report) -> None:
+        for cat, row in self._category_rows.items():
+            totals = report.per_category.get(cat)
+            if totals is None:
+                count, total = 0, Decimal("0.00")
+            else:
+                count, total = totals.count, totals.total
+            self.category_table.item(row, 2).setText(f"{count}")
+            self.category_table.item(row, 3).setText(f"£{total:,.2f}")
+
+    def _reset_live_totals(self) -> None:
+        self._live_totals = {cat: (0, Decimal("0.00")) for cat in _ALL_CATEGORIES}
+        for cat, row in self._category_rows.items():
+            self.category_table.item(row, 2).setText("0")
+            self.category_table.item(row, 3).setText("£0.00")
+
+    def _on_tx_categorized(self, category: str, group: str, amount, direction: str) -> None:
+        if not category:
+            return
+        if category not in self._category_rows:
+            # LLM returned a category we don't track — ignore for live view.
+            return
+        try:
+            amt_abs = abs(Decimal(str(amount)))
+        except (InvalidOperation, TypeError):
+            amt_abs = Decimal("0.00")
+        count, total = self._live_totals.get(category, (0, Decimal("0.00")))
+        # Credits routed to income are shown as positive too; no sign flip needed.
+        count += 1
+        total += amt_abs
+        self._live_totals[category] = (count, total)
+        row = self._category_rows[category]
+        self.category_table.item(row, 2).setText(f"{count}")
+        self.category_table.item(row, 3).setText(f"£{total:,.2f}")
+        self._flash_row(row)
+        self._update_live_status()
+
+    def _flash_row(self, row: int) -> None:
+        highlight = QBrush(QColor(BRAND_MAGENTA))
+        default = QBrush(QColor(BRAND_PURPLE_SOFT)) if row % 2 else QBrush(Qt.GlobalColor.white)
+        fg_white = QBrush(QColor("#FFFFFF"))
+        fg_default = QBrush(QColor("#1F1030"))
+        for col in range(self.category_table.columnCount()):
+            item = self.category_table.item(row, col)
+            if item is not None:
+                item.setBackground(highlight)
+                item.setForeground(fg_white)
+        existing = self._flash_timers.pop(row, None)
+        if existing is not None:
+            existing.stop()
+        t = QTimer(self)
+        t.setSingleShot(True)
+        t.timeout.connect(lambda r=row, d=default, f=fg_default: self._clear_flash(r, d, f))
+        t.start(450)
+        self._flash_timers[row] = t
+
+    def _clear_flash(self, row: int, bg: QBrush, fg: QBrush) -> None:
+        for col in range(self.category_table.columnCount()):
+            item = self.category_table.item(row, col)
+            if item is not None:
+                item.setBackground(bg)
+                item.setForeground(fg)
+        self._flash_timers.pop(row, None)
+
+    def _update_live_status(self) -> None:
+        if not self._live_mode:
+            return
+        total_count = sum(c for c, _ in self._live_totals.values())
+        self.live_status.setText(
+            f"<span style='color:{BRAND_MAGENTA};font-weight:600'>● Live</span> "
+            f"— {total_count} transaction(s) categorised so far"
+        )
+        self.live_status.setVisible(True)
+
+    def _finish_live_mode(self, ok_msg: str) -> None:
+        self._live_mode = False
+        self.live_status.setText(
+            f"<span style='color:{SUCCESS};font-weight:600'>✓ Ready for review</span> — {ok_msg}"
+        )
+        self.live_status.setVisible(True)
+        self.refresh()
+
+    def _declared_income(self) -> Decimal | None:
+        raw = self.declared.text().strip()
+        if not raw:
+            return None
+        try:
+            return Decimal(raw.replace("£", "").replace(",", ""))
+        except InvalidOperation:
+            return None
+
+    def _browse(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select statements", "", "Statements (*.pdf *.csv *.xlsx);;All files (*)"
+        )
+        if files:
+            self._on_files_queued([Path(f) for f in files])
+
+    def _on_files_queued(self, paths: list[Path]) -> None:
+        if self._thread is not None:
+            QMessageBox.information(self, "Busy", "Processing in progress — please wait.")
+            return
+        added = 0
+        for p in paths:
+            key = str(p.resolve())
+            if key in self._queue_items:
+                continue
+            self._pending_paths.append(p)
+            item = QListWidgetItem(f"⏳ Queued: {p.name}")
+            self.file_log.addItem(item)
+            self._queue_items[key] = item
+            added += 1
+        if added:
+            self.progress_label.setVisible(True)
+            self.progress_label.setText(
+                f"{len(self._pending_paths)} file(s) queued. Click 'Process queued files' to start."
+            )
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        has_queue = bool(self._pending_paths)
+        running = self._thread is not None or self._recategorize_thread is not None
+        self.process_btn.setEnabled(has_queue and not running)
+        self.clear_btn.setEnabled(has_queue and not running)
+        self.recategorize_btn.setEnabled(not running)
+
+    def _clear_queue(self) -> None:
+        if self._thread is not None:
+            return
+        for item in self._queue_items.values():
+            row = self.file_log.row(item)
+            if row >= 0:
+                self.file_log.takeItem(row)
+        self._queue_items.clear()
+        self._pending_paths.clear()
+        self.progress_label.setText("Queue cleared.")
+        self._update_buttons()
+
+    def _process_queue(self) -> None:
+        if self._thread is not None or self._recategorize_thread is not None or not self._pending_paths:
+            return
+        paths = list(self._pending_paths)
+        self._show_notice(
+            "Thank you! I will let you know once I have finished reviewing "
+            f"{'this file' if len(paths) == 1 else f'these {len(paths)} files'} for you.",
+            tone="info",
+        )
+        self.progress.setVisible(True)
+        self.progress.setRange(0, len(paths) * 100)
+        self.progress.setValue(0)
+        self._set_progress_running()
+        self.progress_label.setVisible(True)
+        self.progress_label.setText(f"Starting — {len(paths)} file(s) queued…")
+
+        self._live_mode = True
+        self._reset_live_totals()
+        self._update_live_status()
+
+        thread, worker = run_ingest_in_thread(self.client_id, paths)
+        self._thread = thread
+        self._worker = worker
+        worker.progress.connect(self._on_progress)
+        worker.file_done.connect(self._on_file_done)
+        worker.error.connect(self._on_file_error)
+        worker.all_done.connect(self._on_all_done)
+        worker.tx_categorized.connect(self._on_tx_categorized)
+        worker.tx_persisted.connect(self.tx_persisted.emit)
+        # CRITICAL: keep the Python references alive until thread.finished
+        # actually fires (the event loop has fully exited). Otherwise GC may
+        # destroy the QThread wrapper while Qt is still cleaning up, producing
+        # "QThread: Destroyed while thread is still running" warnings — or worse.
+        thread.finished.connect(self._on_thread_finished)
+        thread.start()
+        self._update_buttons()
+        self.processing_changed.emit(True)
+
+    def _find_queue_item(self, name: str) -> QListWidgetItem | None:
+        for key, item in self._queue_items.items():
+            if Path(key).name == name:
+                return item
+        return None
+
+    def _set_progress_running(self) -> None:
+        self.progress.setStyleSheet("")  # default blue/system style
+
+    def _set_progress_done(self) -> None:
+        self.progress.setStyleSheet(
+            "QProgressBar::chunk { background-color: #3a9e52; }"
+        )
+
+    def _on_progress(self, done: int, total: int, message: str) -> None:
+        self.progress.setRange(0, total)
+        self.progress.setValue(done)
+        self.progress_label.setText(message)
+        self.progress_label.setVisible(True)
+
+    def _on_file_done(self, result) -> None:
+        # Look up the queue item by original filename via the stored path.
+        # Use the worker's emitted message to update the right row; fallback
+        # appends a new row so the user never loses status for a file.
+        item = None
+        # Try to find an in-flight queued item in order (first pending).
+        for key, queued in list(self._queue_items.items()):
+            if queued.text().startswith("⏳") or queued.text().startswith("…"):
+                item = queued
+                name = Path(key).name
+                break
+        else:
+            name = "(unknown)"
+        text = (
+            f"⚠ {name}: already imported — skipped (statement {result.statement_id})"
+            if result.duplicate
+            else f"✓ {name}: {result.file_kind} · {result.transaction_count} rows (statement {result.statement_id})"
+        )
+        if item is not None:
+            item.setText(text)
+            self._queue_items = {k: v for k, v in self._queue_items.items() if v is not item}
+        else:
+            self.file_log.addItem(text)
+
+    def _on_file_error(self, name: str, message: str) -> None:
+        item = self._find_queue_item(name)
+        text = f"✗ {name}: {message}"
+        if item is not None:
+            item.setText(text)
+            for k, v in list(self._queue_items.items()):
+                if v is item:
+                    del self._queue_items[k]
+                    break
+        else:
+            self.file_log.addItem(text)
+
+    def _on_all_done(self, ok: int, fail: int) -> None:
+        self.progress.setRange(0, 1)
+        self.progress.setValue(1)
+        self._set_progress_done()
+        if fail:
+            self.progress_label.setText(
+                f"<span style='color:#a52d1e;font-weight:bold'>⚠ Finished with errors</span>"
+                f" — {ok} file(s) imported, {fail} failed"
+            )
+        else:
+            self.progress_label.setText(
+                f"<span style='color:#176b1a;font-weight:bold'>✓ Import complete</span>"
+                f" — {ok} file(s) imported"
+            )
+        # Do NOT clear self._thread / self._worker here — the QThread event
+        # loop is still running. Wait for thread.finished (see _on_thread_finished).
+        self._pending_paths.clear()
+        self._queue_items.clear()
+        self._update_buttons()
+        self._finish_live_mode(
+            f"{ok} file(s) processed — review the category totals below or open 'Review transactions'"
+            if fail == 0
+            else f"{ok} imported, {fail} failed — review totals below"
+        )
+        self._refresh_statements_table()
+        if ok > 0:
+            self._notify_completion(context="statements", ok=ok, fail=fail)
+
+    def _on_thread_finished(self) -> None:
+        # Fires after the QThread's event loop has fully exited. Safe to drop
+        # our Python references now — Qt has finished cleaning up.
+        self._thread = None
+        self._worker = None
+        self._update_buttons()
+        self.processing_changed.emit(self.is_processing())
+
+    def is_processing(self) -> bool:
+        return self._thread is not None or self._recategorize_thread is not None
+
+    def _flagged_count(self) -> int:
+        with session_scope() as s:
+            return int(
+                s.execute(
+                    select(func.count()).select_from(Transaction).where(
+                        Transaction.client_id == self.client_id,
+                        Transaction.needs_review == 1,
+                    )
+                ).scalar_one()
+            )
+
+    def _maybe_emit_flagged(self) -> None:
+        """Fire review_flagged_requested so MainWindow can auto-open Review."""
+        count = self._flagged_count()
+        if count > 0:
+            self.review_flagged_requested.emit(count)
+
+    # --- User-facing completion notifications --------------------------------
+
+    def _user_greeting_name(self) -> str:
+        cu = get_current()
+        if cu is None:
+            return "there"
+        raw = (cu.full_name or cu.username or "").strip()
+        if not raw:
+            return "there"
+        return raw.split()[0]
+
+    def _show_notice(self, html_or_text: str, *, tone: str = "info") -> None:
+        palette = {
+            "info":    ("#EFE7F5", "#4A1766", "#D6C9E6"),   # soft purple
+            "success": ("#E6F4EA", "#176B1A", "#C7E5CD"),   # soft green
+            "warn":    ("#FDECEA", "#A52D1E", "#F3C8C3"),   # soft red
+        }
+        bg, fg, border = palette.get(tone, palette["info"])
+        self.notice.setStyleSheet(
+            f"QLabel {{ background-color: {bg}; color: {fg}; "
+            f"border: 1px solid {border}; border-radius: 8px; "
+            "padding: 10px 12px; font-size: 14px; }}"
+        )
+        self.notice.setText(html_or_text)
+        self.notice.setVisible(True)
+
+    def _clear_notice(self) -> None:
+        self.notice.setVisible(False)
+        self.notice.setText("")
+
+    def _on_notice_link(self, href: str) -> None:
+        if href == "review-flagged":
+            self.review_flagged_requested.emit(self._flagged_count())
+        elif href == "review":
+            self.review_requested.emit()
+        elif href == "dismiss":
+            self._clear_notice()
+
+    def _notify_completion(
+        self,
+        *,
+        context: str,
+        ok: int | None = None,
+        fail: int | None = None,
+        updated: int | None = None,
+    ) -> None:
+        """Show a friendly banner + modal after ingest / re-categorise.
+
+        ``context`` is 'statements' (after ingest) or 'recategorise'.
+        """
+        greeting = self._user_greeting_name()
+        flagged = self._flagged_count()
+
+        if context == "statements":
+            headline = f"Hi {greeting}, I've finished reviewing the statements."
+            if fail:
+                headline += f" ({ok or 0} imported, {fail} failed.)"
+        else:
+            if updated:
+                headline = (
+                    f"Hi {greeting}, I've finished re-checking every transaction — "
+                    f"{updated} were updated."
+                )
+            else:
+                headline = (
+                    f"Hi {greeting}, I've re-checked every transaction — "
+                    "nothing needed updating."
+                )
+
+        if flagged > 0:
+            body_html = (
+                f"<b>{headline}</b><br>"
+                f"<span>There are <b>{flagged}</b> transaction(s) I'd like you to look at. "
+                f"<a href='review-flagged' style='color:#4A1766;font-weight:600'>"
+                "Please can you review these transactions →</a></span> "
+                "<a href='dismiss' style='color:#6B6679'>dismiss</a>"
+            )
+            self._show_notice(body_html, tone="warn")
+            QMessageBox.information(
+                self,
+                "All done",
+                f"{headline}\n\n"
+                f"There are {flagged} transaction(s) I'd like you to look at. "
+                "Click OK to open the review list.",
+            )
+            self.review_flagged_requested.emit(flagged)
+        else:
+            body_html = (
+                f"<b>{headline}</b><br>"
+                "Everything has been categorised with high confidence — no further "
+                "review needed. "
+                "<a href='review' style='color:#4A1766;font-weight:600'>"
+                "Open the transaction list anyway</a> · "
+                "<a href='dismiss' style='color:#6B6679'>dismiss</a>"
+            )
+            self._show_notice(body_html, tone="success")
+            QMessageBox.information(
+                self,
+                "All done",
+                f"{headline}\n\nNothing needs your review — everything was categorised "
+                "with high confidence.",
+            )
+
+    def _start_recategorize(self) -> None:
+        if self._thread is not None or self._recategorize_thread is not None:
+            return
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)   # indeterminate pulse until first progress signal
+        self._set_progress_running()
+        self.progress_label.setVisible(True)
+        self.progress_label.setText("Starting re-categorisation…")
+
+        self._live_mode = True
+        self._reset_live_totals()
+        self._update_live_status()
+
+        thread, worker = run_recategorize_in_thread(self.client_id)
+        self._recategorize_thread = thread
+        self._recategorize_worker = worker
+        worker.progress.connect(self._on_progress)
+        worker.done.connect(self._on_recategorize_done)
+        worker.error.connect(self._on_recategorize_error)
+        worker.tx_categorized.connect(self._on_tx_categorized)
+        worker.tx_persisted.connect(self.tx_persisted.emit)
+        thread.finished.connect(self._on_recategorize_thread_finished)
+        thread.start()
+        self._update_buttons()
+        self.processing_changed.emit(True)
+
+    def _on_recategorize_done(self, count: int) -> None:
+        self.progress.setRange(0, 1)
+        self.progress.setValue(1)
+        self._set_progress_done()
+        if count:
+            self.progress_label.setText(
+                f"<span style='color:#176b1a;font-weight:bold'>✓ Re-categorisation complete</span>"
+                f" — {count} transaction(s) updated"
+            )
+            self._finish_live_mode(f"{count} transaction(s) re-categorised")
+            self._notify_completion(context="recategorise", updated=count)
+        else:
+            self.progress_label.setText(
+                "<span style='color:#555'>No transactions needed re-categorisation.</span>"
+            )
+            self._finish_live_mode("no transactions needed updating")
+            self._notify_completion(context="recategorise", updated=0)
+
+    def _on_recategorize_error(self, message: str) -> None:
+        QMessageBox.critical(self, "Re-categorisation failed", message)
+
+    def _on_recategorize_thread_finished(self) -> None:
+        self._recategorize_thread = None
+        self._recategorize_worker = None
+        self._update_buttons()
+        self.processing_changed.emit(self.is_processing())
+
+    def _export(self) -> None:
+        xlsx_filter = "Excel workbook (*.xlsx)"
+        csv_filter = "Google Sheets / CSV (*.csv)"
+        tsv_filter = "Plain text / tab-separated (*.txt *.tsv)"
+        filters = ";;".join([xlsx_filter, csv_filter, tsv_filter])
+        default_name = f"{self.client_name.replace(' ', '_')}_affordability.xlsx"
+        path, chosen = QFileDialog.getSaveFileName(
+            self, "Export transactions", default_name, filters
+        )
+        if not path:
+            return
+        suffix = Path(path).suffix.lower()
+        export_kind = "xlsx"
+        if chosen == csv_filter or suffix == ".csv":
+            out_path = Path(path)
+            if out_path.suffix.lower() != ".csv":
+                out_path = out_path.with_suffix(".csv")
+            try:
+                out = export_transactions_csv(self.client_id, out_path, delimiter=",")
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.critical(self, "Export failed", str(e))
+                return
+            export_kind = "csv"
+        elif chosen == tsv_filter or suffix in {".tsv", ".txt"}:
+            out_path = Path(path)
+            if out_path.suffix.lower() not in {".tsv", ".txt"}:
+                out_path = out_path.with_suffix(".txt")
+            try:
+                out = export_transactions_csv(self.client_id, out_path, delimiter="\t")
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.critical(self, "Export failed", str(e))
+                return
+            export_kind = "tsv"
+        else:
+            out_path = Path(path)
+            if out_path.suffix.lower() != ".xlsx":
+                out_path = out_path.with_suffix(".xlsx")
+            try:
+                out = export_client_workbook(
+                    self.client_id, out_path, declared_income=self._declared_income()
+                )
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.critical(self, "Export failed", str(e))
+                return
+            export_kind = "xlsx"
+
+        auto_copy = self._auto_save_copy(out, export_kind)
+        self._record_export_audit(out, auto_copy, export_kind)
+
+        message = f"Saved to:\n{out}"
+        if auto_copy is not None:
+            message += f"\n\nA copy was also filed under this client:\n{auto_copy}"
+        QMessageBox.information(self, "Export complete", message)
+
+    def _auto_save_copy(self, primary: Path, export_kind: str) -> Path | None:
+        """Drop a dated duplicate into ``{client_folder}/exports/``.
+
+        Returns the copied path, or ``None`` if the client folder is missing
+        (the save dialog already succeeded, so we keep the UI happy even if
+        auto-filing can't be performed).
+        """
+        try:
+            client = get_client(self.client_id)
+        except ClientError:
+            return None
+        folder = Path(client.folder_path)
+        exports = folder / "exports"
+        try:
+            exports.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        stamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        suffix = primary.suffix or f".{export_kind}"
+        target = exports / f"{stamp}-transactions{suffix}"
+        try:
+            shutil.copy2(primary, target)
+        except OSError:
+            return None
+        return target
+
+    def _record_export_audit(
+        self,
+        primary: Path,
+        auto_copy: Path | None,
+        export_kind: str,
+    ) -> None:
+        cu = get_current()
+        if cu is None:
+            return
+        detail = {
+            "client_id": self.client_id,
+            "format": export_kind,
+            "path": str(primary),
+        }
+        if auto_copy is not None:
+            detail["auto_copy_path"] = str(auto_copy)
+        try:
+            with session_scope() as s:
+                s.add(AuditLog(
+                    user_id=cu.id,
+                    action="export_client",
+                    entity_type="client",
+                    entity_id=self.client_id,
+                    detail_json=json.dumps(detail),
+                ))
+                s.commit()
+        except Exception:  # noqa: BLE001
+            # Audit logging must never block the user's export.
+            return
