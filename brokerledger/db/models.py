@@ -128,6 +128,7 @@ class Transaction(Base):
     needs_review: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
     source: Mapped[str] = mapped_column(String(16), nullable=False, default="llm")
     reason: Mapped[str | None] = mapped_column(Text)
+    reasoning: Mapped[str | None] = mapped_column(Text)
     flags: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow, onupdate=utcnow)
@@ -198,3 +199,31 @@ class AppSetting(Base):
 
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class TrainingNote(Base):
+    """Broker-authored guidance about an AI categorisation.
+
+    Saved per-transaction when the broker reviews the AI's chain-of-thought
+    reasoning and wants to tell the model "you got this wrong, here's why".
+    Notes accumulate in ``consumed_at IS NULL`` state until the broker runs
+    the Training Zone's training pass, which upserts a merchant rule from the
+    guidance and marks the note consumed so it doesn't re-process.
+    """
+
+    __tablename__ = "training_notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    transaction_id: Mapped[int] = mapped_column(
+        ForeignKey("transactions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    suggested_category: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow)
+    consumed_at: Mapped[datetime | None] = mapped_column()
+    consumed_rule_id: Mapped[int | None] = mapped_column(
+        ForeignKey("merchant_rules.id", ondelete="SET NULL")
+    )
+    consumed_confidence: Mapped[float | None] = mapped_column()
+    dismissed_at: Mapped[datetime | None] = mapped_column()

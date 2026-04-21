@@ -12,7 +12,9 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QTableView,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -109,6 +111,7 @@ class TransactionsModel(QAbstractTableModel):
                     "needs_review": bool(r.needs_review),
                     "direction":   r.direction,
                     "flags":       deserialize_flags(r.flags),
+                    "reasoning":   r.reasoning or "",
                 }
                 for r in rows
             ]
@@ -315,6 +318,7 @@ class TransactionsModel(QAbstractTableModel):
                 "needs_review": bool(tx.needs_review),
                 "direction":   tx.direction,
                 "flags":       deserialize_flags(tx.flags),
+                "reasoning":   tx.reasoning or "",
             }
         # Respect the flagged-only filter.
         if self.flagged_only and not payload["needs_review"]:
@@ -626,7 +630,40 @@ class ReviewView(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setWordWrap(False)
 
-        layout.addWidget(self.table)
+        layout.addWidget(self.table, 1)
+
+        # ── Reasoning detail panel ────────────────────────────────────────
+        reasoning_row = QHBoxLayout()
+        reasoning_row.setSpacing(8)
+        self.reasoning_header = QLabel("Select a row to see the AI's reasoning")
+        self.reasoning_header.setStyleSheet(
+            "QLabel { color: #4A1766; font-weight: 600; padding-top: 6px; }"
+        )
+        reasoning_row.addWidget(self.reasoning_header, 1)
+        self.training_note_btn = QPushButton("+  Add training note…")
+        self.training_note_btn.setToolTip(
+            "Save broker guidance for this categorisation. The note is stored now "
+            "and applied later from the AI Training Zone."
+        )
+        self.training_note_btn.setEnabled(False)
+        self.training_note_btn.clicked.connect(self._open_training_note_dialog)
+        reasoning_row.addWidget(self.training_note_btn)
+        layout.addLayout(reasoning_row)
+
+        self.reasoning_text = QTextEdit()
+        self.reasoning_text.setReadOnly(True)
+        self.reasoning_text.setMinimumHeight(70)
+        self.reasoning_text.setMaximumHeight(140)
+        self.reasoning_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.reasoning_text.setStyleSheet(
+            "QTextEdit { background-color: #F7F3FB; border: 1px solid #D8CCE5; "
+            "border-radius: 6px; padding: 8px 10px; color: #2A0A3E; "
+            "font-family: 'Consolas', 'Menlo', monospace; font-size: 12px; }"
+        )
+        self.reasoning_text.setPlaceholderText(
+            "The AI's chain-of-thought reasoning will appear here when a row is selected."
+        )
+        layout.addWidget(self.reasoning_text)
 
         # ── Wire up signals ───────────────────────────────────────────────
         self.model.dataChanged.connect(lambda *_: self.refresh_summary())
@@ -674,10 +711,70 @@ class ReviewView(QWidget):
             self.flagged_banner.setVisible(False)
 
     def _on_selection_changed(self, _selected, _deselected) -> None:
-        has = bool(self.table.selectionModel().selectedRows())
+        indices = self.table.selectionModel().selectedRows()
+        has = bool(indices)
         self.confirm_btn.setEnabled(has)
         self.apply_category_btn.setEnabled(has)
         self.disregard_btn.setEnabled(has)
+        # Reasoning panel: only makes sense for a single-row selection.
+        single = indices[0] if len(indices) == 1 else None
+        if single is None:
+            self.training_note_btn.setEnabled(False)
+            self.reasoning_header.setText("Select a single row to see the AI's reasoning")
+            self.reasoning_text.clear()
+            return
+        row = self.model._rows[single.row()]
+        self.training_note_btn.setEnabled(True)
+        merchant = row.get("merchant") or row.get("desc") or "(unknown)"
+        self.reasoning_header.setText(
+            f"AI reasoning — {merchant} → {row.get('category') or '(uncategorised)'}"
+        )
+        trace = row.get("reasoning") or ""
+        if not trace:
+            self.reasoning_text.setPlaceholderText(
+                "No reasoning stored for this row — it was decided by a register/rule match "
+                "rather than the LLM, or was saved before chain-of-thought was enabled."
+            )
+            self.reasoning_text.clear()
+        else:
+            self.reasoning_text.setPlainText(trace)
+
+    def _open_training_note_dialog(self) -> None:
+        indices = self.table.selectionModel().selectedRows()
+        if len(indices) != 1:
+            return
+        row = self.model._rows[indices[0].row()]
+        from .dialogs.training_note_dialog import TrainingNoteDialog
+        dlg = TrainingNoteDialog(
+            description=row["desc"],
+            merchant=row["merchant"],
+            current_category=row["category"],
+            reasoning=row.get("reasoning", ""),
+            parent=self,
+        )
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        note_text, suggested = dlg.values()
+        from ..auth.session import require_login
+        from ..categorize.training import save_note
+        user = require_login()
+        try:
+            save_note(
+                transaction_id=row["id"],
+                user_id=user.id,
+                note=note_text,
+                suggested_category=suggested,
+            )
+        except ValueError as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Could not save note", str(e))
+            return
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(
+            self, "Training note saved",
+            "Your guidance is stored. Open the AI Training Zone and click "
+            "<b>Start Training</b> when you're ready to apply it.",
+        )
 
     def _disregard_selected(self) -> None:
         indices = self.table.selectionModel().selectedRows()

@@ -23,6 +23,7 @@ from .login_view import LoginView
 from .review_view import ReviewView
 from .settings_view import SettingsView
 from .theme import load_logo_pixmap
+from .training_view import TrainingView
 from .widgets.avatar import AvatarLabel
 
 
@@ -101,22 +102,26 @@ class MainWindow(QMainWindow):
         self.admin = AdminUsersView()
         self.settings = SettingsView()
         self.audit_log = AuditLogView()
+        self.training = TrainingView()
 
         self.stack.addWidget(self.login)      # 0
         self.stack.addWidget(self.clients)    # 1
         self.stack.addWidget(self.admin)      # 2
         self.stack.addWidget(self.settings)   # 3
         self.stack.addWidget(self.audit_log)  # 4
+        self.stack.addWidget(self.training)   # 5
 
         self.login.logged_in.connect(self._on_logged_in)
         self.clients.logout_requested.connect(self._on_logout)
         self.clients.admin_requested.connect(self._open_admin)
         self.clients.settings_requested.connect(self._open_settings)
         self.clients.audit_log_requested.connect(self._open_audit_log)
+        self.clients.training_requested.connect(self._open_training)
         self.clients.open_client.connect(self._open_client_detail)
         self.admin.back_requested.connect(self._show_clients)
         self.settings.back_requested.connect(self._show_clients)
         self.audit_log.back_requested.connect(self._show_clients)
+        self.training.back_requested.connect(self._show_clients)
         self.settings.profile_changed.connect(self.header.refresh_user)
 
         # Cache detail views per client so their worker threads survive
@@ -168,6 +173,10 @@ class MainWindow(QMainWindow):
             )
             return
         self.stack.setCurrentWidget(self.audit_log)
+
+    def _open_training(self) -> None:
+        self.training.refresh()
+        self.stack.setCurrentWidget(self.training)
 
     def _show_clients(self) -> None:
         self.clients.refresh()

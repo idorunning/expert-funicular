@@ -38,6 +38,7 @@ class Decision:
     source: str
     reason: str
     needs_review: bool
+    thinking: str = ""
 
 
 def _escalate_if_risk(d: Decision) -> Decision:
@@ -53,6 +54,7 @@ def _escalate_if_risk(d: Decision) -> Decision:
         source=d.source,
         reason=reason,
         needs_review=True,
+        thinking=d.thinking,
     )
 
 
@@ -190,6 +192,7 @@ def _decide(
         source=source,
         reason=out.reason,
         needs_review=needs_review,
+        thinking=getattr(out, "thinking", "") or "",
     ))
 
 
@@ -237,12 +240,14 @@ def categorize_statement(
                     source=decision.source,
                     reason="credit defaulted to income; " + decision.reason,
                     needs_review=True,
+                    thinking=decision.thinking,
                 )
             tx.category = decision.category
             tx.category_group = decision.group
             tx.confidence = decision.confidence
             tx.source = decision.source
             tx.reason = decision.reason
+            tx.reasoning = decision.thinking or None
             tx.flags = serialize_flags(detect_flags(tx.description_raw, tx.merchant_normalized, direction=tx.direction or "debit"))
             tx.needs_review = 1 if decision.needs_review else 0
             tx.updated_at = utcnow()
@@ -280,6 +285,7 @@ def recategorize_transaction(tx_id: int, *, llm: LLMClient | None = None) -> Dec
         tx.confidence = decision.confidence
         tx.source = decision.source
         tx.reason = decision.reason
+        tx.reasoning = decision.thinking or None
         tx.flags = serialize_flags(detect_flags(tx.description_raw, tx.merchant_normalized, direction=tx.direction or "debit"))
         tx.needs_review = 1 if decision.needs_review else 0
         tx.updated_at = utcnow()
@@ -331,12 +337,14 @@ def recategorize_client(
                     source=decision.source,
                     reason="credit defaulted to income; " + decision.reason,
                     needs_review=True,
+                    thinking=decision.thinking,
                 )
             tx.category = decision.category
             tx.category_group = decision.group
             tx.confidence = decision.confidence
             tx.source = decision.source
             tx.reason = decision.reason
+            tx.reasoning = decision.thinking or None
             tx.flags = serialize_flags(detect_flags(tx.description_raw, tx.merchant_normalized, direction=tx.direction or "debit"))
             tx.needs_review = 1 if decision.needs_review else 0
             tx.updated_at = utcnow()

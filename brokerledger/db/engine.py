@@ -41,6 +41,7 @@ def init_engine(db_file: Path | None = None, echo: bool = False) -> Engine:
     _ensure_password_reset_code_columns(_engine)
     _ensure_statement_verified_columns(_engine)
     _ensure_transaction_flags_column(_engine)
+    _ensure_transaction_reasoning_column(_engine)
     _ensure_transaction_source_check(_engine)
     _migrate_retired_categories(_engine)
     _ensure_audit_log_indexes(_engine)
@@ -101,6 +102,17 @@ def _ensure_transaction_flags_column(engine: Engine) -> None:
         }
         if "flags" not in cols:
             c.exec_driver_sql("ALTER TABLE transactions ADD COLUMN flags VARCHAR(64)")
+
+
+def _ensure_transaction_reasoning_column(engine: Engine) -> None:
+    """Add the chain-of-thought reasoning column to pre-existing transactions tables."""
+    with engine.begin() as c:
+        cols = {
+            row[1]
+            for row in c.exec_driver_sql("PRAGMA table_info(transactions)").fetchall()
+        }
+        if "reasoning" not in cols:
+            c.exec_driver_sql("ALTER TABLE transactions ADD COLUMN reasoning TEXT")
 
 
 def _ensure_transaction_source_check(engine: Engine) -> None:

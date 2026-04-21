@@ -131,6 +131,7 @@ class ClientsView(QWidget):
     admin_requested = Signal()
     settings_requested = Signal()
     audit_log_requested = Signal()
+    training_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -172,6 +173,8 @@ class ClientsView(QWidget):
         self._menu.setToolTipsVisible(True)
         self.settings_action = self._menu.addAction("Settings…")
         self.settings_action.triggered.connect(self.settings_requested.emit)
+        self.training_action = self._menu.addAction("AI Training Zone…")
+        self.training_action.triggered.connect(self.training_requested.emit)
         self.admin_action = self._menu.addAction("Admin (manage users)…")
         self.admin_action.triggered.connect(self.admin_requested.emit)
         self.audit_action = self._menu.addAction("Audit log…")
