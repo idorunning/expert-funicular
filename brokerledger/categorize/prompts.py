@@ -44,21 +44,29 @@ def build_system_prompt() -> str:
         "unsure.",
         '  "reason":     <= 140 char broker-facing summary.',
         "",
-        "Worked examples (follow this shape, do NOT copy verbatim):",
+        "Worked examples — reuse the same mappings when the new transaction "
+        "matches one of these patterns. Examples use the exact same input "
+        "format you will receive below.",
         "",
-        'Tx: "POCKET MONEY" debit £15.00',
+        'Description (as printed): "POCKET MONEY"',
+        'Normalised merchant: "POCKET MONEY"',
+        "Amount (GBP, sign = direction): -15.00",
+        "Direction: debit",
         "{",
-        '  "thinking": "Pocket money is the common UK term for a weekly '
-        "allowance a parent gives to a child. £15 fits typical amounts for "
-        "a child's allowance. It is a household cost of raising children "
-        'rather than Entertainment or a bank transfer.",',
+        '  "thinking": "Pocket money is the UK term for a weekly allowance '
+        "a parent gives to a child. £15 fits a child's allowance. The broker "
+        "tracks this under Child care because it is a household cost of "
+        'raising children, not Entertainment or a bank transfer.",',
         '  "category": "Child care",',
-        '  "group": "committed",',
-        '  "confidence": 0.82,',
+        '  "group": "discretionary",',
+        '  "confidence": 0.85,',
         '  "reason": "Pocket money = child allowance -> Child care"',
         "}",
         "",
-        'Tx: "SALARY HSBC" credit £2,400.00',
+        'Description (as printed): "SALARY HSBC"',
+        'Normalised merchant: "SALARY HSBC"',
+        "Amount (GBP, sign = direction): 2400.00",
+        "Direction: credit",
         "{",
         '  "thinking": "A credit labelled SALARY is a wage payment from an '
         "employer; HSBC is the paying bank. Direction is credit, amount is "
@@ -69,7 +77,10 @@ def build_system_prompt() -> str:
         '  "reason": "Salary credit from employer"',
         "}",
         "",
-        'Tx: "JUST EAT LONDON" debit £22.40',
+        'Description (as printed): "JUST EAT LONDON"',
+        'Normalised merchant: "JUST EAT"',
+        "Amount (GBP, sign = direction): -22.40",
+        "Direction: debit",
         "{",
         '  "thinking": "Just Eat is a takeaway food delivery platform. '
         "Debits to it are discretionary food spending rather than weekly "
@@ -78,6 +89,20 @@ def build_system_prompt() -> str:
         '  "group": "discretionary",',
         '  "confidence": 0.88,',
         '  "reason": "Takeaway via Just Eat"',
+        "}",
+        "",
+        'Description (as printed): "ALLOWANCE"',
+        'Normalised merchant: "ALLOWANCE"',
+        "Amount (GBP, sign = direction): -20.00",
+        "Direction: debit",
+        "{",
+        '  "thinking": "A debit labelled ALLOWANCE with no other context is '
+        "the same pattern as POCKET MONEY — a recurring small payment a "
+        'parent gives to a child. Classify as Child care.",',
+        '  "category": "Child care",',
+        '  "group": "discretionary",',
+        '  "confidence": 0.78,',
+        '  "reason": "Allowance = child allowance -> Child care"',
         "}",
         "",
         "Taxonomy (group :: category) — pick category string only:",

@@ -40,6 +40,7 @@ class TrainingHighlight:
     scope: str
     was_new_rule: bool
     note_id: int
+    siblings_updated: int = 0
 
 
 @dataclass
@@ -49,6 +50,7 @@ class TrainingReport:
     rules_updated: int = 0
     skipped_no_category: int = 0
     skipped_dismissed: int = 0
+    siblings_updated: int = 0
     highlights: list[TrainingHighlight] = field(default_factory=list)
 
 
@@ -162,6 +164,10 @@ def dismiss_note(note_id: int, user_id: int | None) -> bool:
 def _apply_note(session: Session, *, note: TrainingNote, tx: Transaction) -> TrainingHighlight | None:
     """Consume a single note: upsert the merchant rule and mark consumed.
 
+    Also propagates the correction to sibling transactions (other rows for
+    the same client whose merchant/description matches closely), so the
+    broker doesn't have to train the same merchant row-by-row.
+
     Returns a highlight describing the change, or None if the note lacks a
     category (skipped).
     """
@@ -212,12 +218,45 @@ def _apply_note(session: Session, *, note: TrainingNote, tx: Transaction) -> Tra
     tx.needs_review = 0
     tx.reason = "trained via broker note"
     tx.updated_at = now
+
+    # Propagate to sibling transactions for this client. Without this, the
+    # broker trains one POCKET MONEY row and nine others on the same
+    # statement keep their old (wrong) LLM-assigned category — which looks
+    # exactly like "training didn't work". Mirrors apply_correction.
+    siblings_updated = _apply_to_siblings(
+        session, source_tx=tx, new_category=category,
+    )
+
     return TrainingHighlight(
         merchant=merchant,
         category=category,
         scope="client",
         was_new_rule=was_new,
         note_id=note.id,
+        siblings_updated=siblings_updated,
+    )
+
+
+def _apply_to_siblings(
+    session: Session, *, source_tx: Transaction, new_category: str,
+) -> int:
+    """Apply ``new_category`` to every sibling of ``source_tx`` whose
+    similarity clears the auto threshold. Rows with ``source='user'`` are
+    preserved by find_siblings' own filter.
+    """
+    from .siblings import apply_auto_siblings, find_siblings
+
+    scan = find_siblings(session, source_tx=source_tx, new_category=new_category)
+    # Training is explicit broker intent — auto-apply the confirm tier too,
+    # not just the top tier. The broker has already said "this merchant
+    # goes in this category"; prompting again would just recreate the
+    # row-by-row loop we're trying to eliminate.
+    all_candidates = list(scan.auto) + list(scan.confirm)
+    return apply_auto_siblings(
+        session,
+        source_tx=source_tx,
+        new_category=new_category,
+        candidates=all_candidates,
     )
 
 
@@ -255,6 +294,7 @@ def run_training_pass(user_id: int | None = None) -> TrainingReport:
                 report.rules_created += 1
             else:
                 report.rules_updated += 1
+            report.siblings_updated += highlight.siblings_updated
             report.highlights.append(highlight)
         if report.notes_processed:
             s.add(AuditLog(
@@ -275,4 +315,5 @@ def _summary_json(report: TrainingReport) -> str:
         "rules_created": report.rules_created,
         "rules_updated": report.rules_updated,
         "skipped_no_category": report.skipped_no_category,
+        "siblings_updated": report.siblings_updated,
     })

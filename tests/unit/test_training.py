@@ -212,6 +212,82 @@ def test_run_training_pass_idempotent_when_no_unconsumed_notes(logged_in_admin, 
     assert report.rules_updated == 0
 
 
+def _write_multi_pocket_money_csv(tmp_path: Path) -> Path:
+    """Three POCKET MONEY rows plus an unrelated one, so we can tell that
+    training on one row fans out to the other two but leaves the unrelated
+    row alone."""
+    p = tmp_path / "multi.csv"
+    p.write_text(
+        "Date,Description,Debit,Credit,Balance\n"
+        "01/03/2025,POCKET MONEY,15.00,,985.00\n"
+        "08/03/2025,POCKET MONEY,15.00,,970.00\n"
+        "15/03/2025,POCKET MONEY,15.00,,955.00\n"
+        "20/03/2025,TESCO STORES,40.00,,915.00\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def test_training_propagates_to_sibling_transactions(logged_in_admin, tmp_path: Path):
+    """Regression: training on ONE POCKET MONEY row must reclassify EVERY
+    other POCKET MONEY row for the same client. Without sibling
+    propagation the broker sees nine out of ten rows still on the wrong
+    category after training and concludes the feature is broken."""
+    client = create_client("Sibling Propagation Client")
+    csv_path = _write_multi_pocket_money_csv(tmp_path)
+    result = ingest_statement(client.id, csv_path)
+    categorize_statement(result.statement_id, llm=FakeLLMClient())
+
+    with session_scope() as s:
+        pocket_rows = s.execute(
+            select(Transaction).where(
+                Transaction.client_id == client.id,
+                Transaction.description_raw == "POCKET MONEY",
+            )
+        ).scalars().all()
+        assert len(pocket_rows) == 3
+        # Pick the first row as the one the broker opens a training note on.
+        trained_tx_id = pocket_rows[0].id
+        untrained_ids = [r.id for r in pocket_rows[1:]]
+        # FakeLLMClient has no rule for POCKET MONEY, so the initial
+        # category will NOT be Child care.
+        for row in pocket_rows:
+            assert row.category != "Child care"
+        # Grab the unrelated tx id too.
+        tesco_id = s.execute(
+            select(Transaction.id).where(
+                Transaction.client_id == client.id,
+                Transaction.description_raw == "TESCO STORES",
+            )
+        ).scalar_one()
+
+    training.save_note(
+        transaction_id=trained_tx_id,
+        user_id=logged_in_admin.id,
+        note="Pocket money is a child allowance — map to Child care.",
+        suggested_category="Child care",
+    )
+    report = training.run_training_pass(user_id=logged_in_admin.id)
+
+    assert report.notes_processed == 1
+    # Two siblings should have been auto-updated.
+    assert report.siblings_updated == 2
+
+    with session_scope() as s:
+        # All three POCKET MONEY rows now sit on Child care.
+        trained = s.get(Transaction, trained_tx_id)
+        assert trained.category == "Child care"
+        assert trained.source == "user"
+        for sid in untrained_ids:
+            sibling = s.get(Transaction, sid)
+            assert sibling.category == "Child care"
+            assert sibling.source == "sibling_auto"
+            assert sibling.needs_review == 0
+        # The unrelated TESCO row is untouched.
+        tesco = s.get(Transaction, tesco_id)
+        assert tesco.category != "Child care"
+
+
 def test_list_unconsumed_returns_tx_context(logged_in_admin, tmp_path: Path):
     client = _ingest_demo(tmp_path, use_thinking=True)
     with session_scope() as s:

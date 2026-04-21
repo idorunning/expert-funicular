@@ -462,11 +462,17 @@ class TrainingView(QWidget):
                    if report.skipped_no_category else "")
             )
             return
+        siblings_line = (
+            f"<br><b>{report.siblings_updated}</b> other transaction(s) "
+            "re-categorised to match."
+            if report.siblings_updated else ""
+        )
         QMessageBox.information(
             self, "Training complete",
             f"<b>{report.notes_processed}</b> note(s) applied.<br>"
             f"<b>{report.rules_created}</b> new rule(s) created, "
             f"<b>{report.rules_updated}</b> existing rule(s) reinforced."
+            f"{siblings_line}"
         )
 
     def _on_training_error(self, message: str) -> None:

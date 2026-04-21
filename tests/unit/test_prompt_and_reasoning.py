@@ -40,6 +40,34 @@ def test_prompt_contains_salary_and_takeaway_worked_examples():
     assert "JUST EAT" in prompt
 
 
+def test_prompt_child_care_example_group_matches_taxonomy():
+    """Regression: the POCKET MONEY -> Child care example must declare
+    ``"group": "discretionary"`` because ``Child care`` lives in the
+    discretionary taxonomy. A contradiction between the worked example's
+    group and the taxonomy listing confuses small local models and was
+    observed to push them off the Child care mapping entirely."""
+    prompt = build_system_prompt()
+    # Locate the POCKET MONEY example block and make sure Child care is
+    # paired with discretionary, not committed, inside it.
+    idx = prompt.index("POCKET MONEY")
+    end = prompt.index("}", idx)
+    block = prompt[idx:end]
+    assert '"category": "Child care"' in block
+    assert '"group": "discretionary"' in block
+    assert '"group": "committed"' not in block
+
+
+def test_prompt_does_not_instruct_model_to_avoid_examples():
+    """Regression: an earlier iteration told the model ``do NOT copy
+    verbatim``, which small models read as 'don't reuse the POCKET MONEY ->
+    Child care mapping'. We want the opposite behaviour — reuse the
+    mappings when the input matches."""
+    prompt = build_system_prompt()
+    lower = prompt.lower()
+    assert "do not copy" not in lower
+    assert "do not copy verbatim" not in lower
+
+
 class _ThinkingLLMClient(FakeLLMClient):
     """FakeLLMClient subclass that returns a chain-of-thought trace."""
 
