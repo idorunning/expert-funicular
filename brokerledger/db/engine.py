@@ -43,9 +43,51 @@ def init_engine(db_file: Path | None = None, echo: bool = False) -> Engine:
     _ensure_transaction_flags_column(_engine)
     _ensure_transaction_reasoning_column(_engine)
     _ensure_transaction_source_check(_engine)
+    _ensure_client_deleted_at_column(_engine)
+    _ensure_user_role_check_includes_admin_staff(_engine)
     _migrate_retired_categories(_engine)
     _ensure_audit_log_indexes(_engine)
     return _engine
+
+
+def _ensure_client_deleted_at_column(engine: Engine) -> None:
+    """Add the admin-only soft-delete column to pre-existing clients tables."""
+    with engine.begin() as c:
+        cols = {
+            row[1]
+            for row in c.exec_driver_sql("PRAGMA table_info(clients)").fetchall()
+        }
+        if "deleted_at" not in cols:
+            c.exec_driver_sql("ALTER TABLE clients ADD COLUMN deleted_at DATETIME")
+
+
+def _ensure_user_role_check_includes_admin_staff(engine: Engine) -> None:
+    """Rebuild the users table if its ck_user_role CHECK pre-dates 'admin_staff'.
+
+    SQLite can't alter a CHECK in-place; copy the data into a fresh table and
+    swap.  Matches the pattern used by ``_ensure_transaction_source_check``.
+    """
+    with engine.begin() as c:
+        row = c.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='users'"
+        ).fetchone()
+        if not row or not row[0]:
+            return
+        if "admin_staff" in row[0]:
+            return
+        logger.info("Rebuilding users table to include admin_staff in role check")
+        cols_info = c.exec_driver_sql("PRAGMA table_info(users)").fetchall()
+        col_names = [r[1] for r in cols_info]
+        col_list = ", ".join(col_names)
+        c.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        c.exec_driver_sql("ALTER TABLE users RENAME TO _users_old")
+    Base.metadata.tables["users"].create(engine)
+    with engine.begin() as c:
+        c.exec_driver_sql(
+            f"INSERT INTO users ({col_list}) SELECT {col_list} FROM _users_old"
+        )
+        c.exec_driver_sql("DROP TABLE _users_old")
+        c.exec_driver_sql("PRAGMA foreign_keys=ON")
 
 
 def _ensure_user_photo_column(engine: Engine) -> None:

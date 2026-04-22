@@ -43,7 +43,28 @@ class User(Base):
     last_login_at: Mapped[datetime | None] = mapped_column()
     photo_path: Mapped[str | None] = mapped_column(String(500))
 
-    __table_args__ = (CheckConstraint("role IN ('admin','broker')", name="ck_user_role"),)
+    __table_args__ = (
+        CheckConstraint("role IN ('admin','broker','admin_staff')", name="ck_user_role"),
+    )
+
+
+class AdminBrokerAssignment(Base):
+    """Which brokers an admin-staff user is allowed to act on behalf of.
+
+    An ``admin_staff`` user can see and manage clients of every broker they
+    are assigned to.  The ``admin`` role is a super-admin and bypasses this
+    table (sees everything).  Brokers see only their own data.
+    """
+
+    __tablename__ = "admin_broker_assignments"
+
+    admin_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    broker_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow)
 
 
 class PasswordResetRequest(Base):
@@ -73,6 +94,10 @@ class Client(Base):
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow)
     archived_at: Mapped[datetime | None] = mapped_column()
+    # Soft-delete marker. Distinct from ``archived_at`` (which is "closed" —
+    # hidden from default view but still broker-visible). ``deleted_at`` is
+    # admin-only and hides the client from everyone except administrators.
+    deleted_at: Mapped[datetime | None] = mapped_column()
 
     statements: Mapped[list["Statement"]] = relationship(back_populates="client", cascade="all, delete-orphan")
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="client", cascade="all, delete-orphan")

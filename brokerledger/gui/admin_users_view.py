@@ -12,10 +12,13 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSplitter,
@@ -69,7 +72,10 @@ class _UserDialog(QDialog):
         self.username = QLineEdit()
         self.username.setPlaceholderText("Short handle, e.g. 'jsmith'")
         self.role = QComboBox()
-        self.role.addItems(["broker", "admin"])
+        # "admin" is super-admin (can delete, see all data).
+        # "admin_staff" is support staff allocated to one or more brokers.
+        # "broker" owns their own clients.
+        self.role.addItems(["broker", "admin_staff", "admin"])
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         if existing is not None:
@@ -156,6 +162,61 @@ class _UserDialog(QDialog):
         }
 
 
+class _BrokerAllocationsDialog(QDialog):
+    """Pick which brokers an admin-staff user should be allowed to act for."""
+
+    def __init__(self, admin_user: User, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Broker allocations for {admin_user.username}")
+        self.setMinimumWidth(420)
+        self._admin_user_id = admin_user.id
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            "Select the brokers this admin-staff user can support.  They "
+            "will see clients belonging to every ticked broker and nothing else."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        brokers = users_service.list_brokers()
+        already = set(users_service.get_admin_broker_ids(admin_user.id))
+
+        self.listw = QListWidget()
+        for b in brokers:
+            label = f"{b.full_name or b.username}  ·  @{b.username}"
+            it = QListWidgetItem(label)
+            it.setData(Qt.ItemDataRole.UserRole, b.id)
+            it.setCheckState(
+                Qt.CheckState.Checked if b.id in already else Qt.CheckState.Unchecked
+            )
+            self.listw.addItem(it)
+        if self.listw.count() == 0:
+            self.listw.addItem("(No active brokers — create one first.)")
+            self.listw.setEnabled(False)
+        layout.addWidget(self.listw, 1)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def selected_broker_ids(self) -> list[int]:
+        out: list[int] = []
+        for i in range(self.listw.count()):
+            it = self.listw.item(i)
+            if it.checkState() == Qt.CheckState.Checked:
+                bid = it.data(Qt.ItemDataRole.UserRole)
+                if bid is not None:
+                    out.append(int(bid))
+        return out
+
+
 class _ResolveResetDialog(QDialog):
     def __init__(self, email: str, parent=None) -> None:
         super().__init__(parent)
@@ -219,6 +280,13 @@ class AdminUsersView(QWidget):
         toggle_btn.setObjectName("GhostButton")
         toggle_btn.clicked.connect(self._toggle_active)
         actions.addWidget(toggle_btn)
+        allocs_btn = QPushButton("Broker allocations…")
+        allocs_btn.setToolTip(
+            "Admin-staff users must be allocated to one or more brokers. "
+            "They see only those brokers' clients."
+        )
+        allocs_btn.clicked.connect(self._edit_allocations)
+        actions.addWidget(allocs_btn)
         delete_btn = QPushButton("Delete…")
         delete_btn.setObjectName("GhostButton")
         delete_btn.clicked.connect(self._delete_selected)
@@ -486,6 +554,37 @@ class AdminUsersView(QWidget):
             return
         users_service.clear_user_photo(uid)
         self.refresh()
+
+    def _edit_allocations(self) -> None:
+        uid = self._selected_user_id()
+        if uid is None:
+            QMessageBox.information(self, "No selection", "Select a user first.")
+            return
+        with session_scope() as s:
+            u = s.get(User, uid)
+            if u is None:
+                return
+            snapshot = User(
+                id=u.id, username=u.username, email=u.email,
+                role=u.role, full_name=u.full_name,
+                password_hash=u.password_hash,
+            )
+        if snapshot.role != "admin_staff":
+            QMessageBox.information(
+                self, "Not an admin-staff user",
+                "Broker allocations only apply to users whose role is "
+                "'admin_staff'.  Change the role in Edit… first.",
+            )
+            return
+        dlg = _BrokerAllocationsDialog(snapshot, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            users_service.set_admin_broker_ids(uid, dlg.selected_broker_ids())
+        except (ValueError, PermissionError) as e:
+            QMessageBox.warning(self, "Could not save allocations", str(e))
+            return
+        QMessageBox.information(self, "Done", "Broker allocations updated.")
 
     def _toggle_active(self) -> None:
         uid = self._selected_user_id()

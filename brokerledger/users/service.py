@@ -7,8 +7,9 @@ from pathlib import Path
 from sqlalchemy import select
 
 from .. import paths
+from ..auth.session import require_admin
 from ..db.engine import session_scope
-from ..db.models import AuditLog, User
+from ..db.models import AdminBrokerAssignment, AuditLog, User, utcnow
 
 
 @dataclass(frozen=True)
@@ -117,3 +118,80 @@ def clear_user_photo(user_id: int) -> None:
             Path(existing).unlink()
         except OSError:
             pass
+
+
+# ── Admin-staff ↔ broker allocations ─────────────────────────────────────────
+
+
+def list_brokers() -> list[UserRow]:
+    """Every active user whose role is 'broker' — the targets of an allocation."""
+    with session_scope() as s:
+        q = (
+            select(User)
+            .where(User.is_active == 1, User.role == "broker")
+            .order_by(User.username)
+        )
+        return [_row(u) for u in s.execute(q).scalars().all()]
+
+
+def get_admin_broker_ids(admin_user_id: int) -> list[int]:
+    """Return broker user-ids currently allocated to ``admin_user_id``."""
+    with session_scope() as s:
+        rows = s.execute(
+            select(AdminBrokerAssignment.broker_user_id).where(
+                AdminBrokerAssignment.admin_user_id == admin_user_id
+            )
+        ).all()
+        return sorted(r[0] for r in rows)
+
+
+def set_admin_broker_ids(admin_user_id: int, broker_ids: list[int]) -> None:
+    """Replace the broker allocations for an admin-staff user. Admin-only."""
+    actor = require_admin()
+    broker_ids_set = {int(b) for b in broker_ids if int(b) != admin_user_id}
+    with session_scope() as s:
+        target = s.get(User, admin_user_id)
+        if target is None:
+            raise ValueError(f"User {admin_user_id} not found")
+        if target.role != "admin_staff":
+            raise ValueError(
+                "Broker allocations only apply to users with role 'admin_staff'."
+            )
+        if broker_ids_set:
+            rows = s.execute(
+                select(User.id).where(
+                    User.id.in_(broker_ids_set),
+                    User.role == "broker",
+                    User.is_active == 1,
+                )
+            ).all()
+            found = {r[0] for r in rows}
+            missing = broker_ids_set - found
+            if missing:
+                raise ValueError(f"Broker user(s) not found or inactive: {sorted(missing)}")
+
+        existing = s.execute(
+            select(AdminBrokerAssignment).where(
+                AdminBrokerAssignment.admin_user_id == admin_user_id
+            )
+        ).scalars().all()
+        current_ids = {a.broker_user_id for a in existing}
+
+        for a in existing:
+            if a.broker_user_id not in broker_ids_set:
+                s.delete(a)
+        now = utcnow()
+        for bid in broker_ids_set - current_ids:
+            s.add(AdminBrokerAssignment(
+                admin_user_id=admin_user_id,
+                broker_user_id=bid,
+                created_at=now,
+            ))
+        s.add(AuditLog(
+            user_id=actor.id,
+            action="set_admin_broker_ids",
+            entity_type="user",
+            entity_id=admin_user_id,
+            detail_json='{"broker_ids": ' + str(sorted(broker_ids_set)) + "}",
+        ))
+        s.commit()

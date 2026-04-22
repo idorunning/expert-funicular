@@ -5,23 +5,32 @@ Rendered as a small framed popup with a grid of tool buttons. Each button
 shows the category's Mortgage Oasis SVG icon above its name. Clicking a
 button emits :class:`CategoryGridPicker.category_selected` and closes the
 popup; that commits the choice via :class:`CategoryGridDelegate`.
+
+The popup also carries a "⊘ Disregard" footer button that short-circuits
+categorisation for transactions which don't fit any category (small one-off
+payments, personal transfers, etc.) — it emits the special
+``"Transfer/Excluded"`` category that the review model treats as disregarded.
 """
 from __future__ import annotations
 
 from PySide6.QtCore import (
     QModelIndex,
     QPersistentModelIndex,
+    QRect,
     QSize,
     Qt,
     Signal,
 )
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemDelegate,
     QFrame,
     QGridLayout,
+    QHBoxLayout,
+    QPushButton,
     QStyledItemDelegate,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -32,6 +41,12 @@ from ...categorize.taxonomy import (
     includes_for,
     user_visible_categories,
 )
+
+
+# The model treats this special category as "disregarded" — it excludes
+# affected transactions from affordability totals.  Keep the string in sync
+# with ``TransactionsModel.disregard_rows`` in ``review_view.py``.
+DISREGARD_CATEGORY = "Transfer/Excluded"
 
 
 _BRAND_PURPLE = "#4A1766"
@@ -62,6 +77,20 @@ QToolButton:checked {{
     color: #FFFFFF;
     border: 1px solid {_BRAND_MAGENTA};
 }}
+QPushButton#DisregardButton {{
+    background: #FFFFFF;
+    color: {_BRAND_PURPLE};
+    border: 1px solid {_BRAND_PURPLE};
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 11px;
+    font-weight: 600;
+}}
+QPushButton#DisregardButton:hover {{
+    background: {_BRAND_PURPLE_SOFT};
+    border: 1px solid {_BRAND_MAGENTA};
+    color: {_BRAND_MAGENTA};
+}}
 """
 
 
@@ -84,10 +113,13 @@ class CategoryGridPicker(QFrame):
 
         cats = categories if categories is not None else user_visible_categories()
 
-        layout = QGridLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setHorizontalSpacing(6)
-        layout.setVerticalSpacing(6)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(6)
 
         cols = 4
         committed = set(COMMITTED_CATEGORIES)
@@ -124,13 +156,65 @@ class CategoryGridPicker(QFrame):
                 btn.setChecked(True)
 
             btn.clicked.connect(lambda _checked=False, c=cat: self._select(c))
-            layout.addWidget(btn, i // cols, i % cols)
+            grid.addWidget(btn, i // cols, i % cols)
+
+        root.addLayout(grid)
+
+        # Footer: Disregard button. Emits a special category that the review
+        # model interprets as "excluded from affordability totals" so odd
+        # one-off transactions don't force an arbitrary category choice.
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 4, 0, 0)
+        footer.addStretch(1)
+        self.disregard_btn = QPushButton("⊘  Disregard")
+        self.disregard_btn.setObjectName("DisregardButton")
+        self.disregard_btn.setToolTip(
+            "Mark this transaction as 'Transfer/Excluded' — it will be ignored "
+            "in affordability totals.  Use for odd one-off payments that don't "
+            "fit any category or are too small to matter."
+        )
+        self.disregard_btn.clicked.connect(lambda: self._select(DISREGARD_CATEGORY))
+        footer.addWidget(self.disregard_btn)
+        root.addLayout(footer)
 
         self.adjustSize()
 
     def _select(self, category: str) -> None:
         self.category_selected.emit(category)
         self.close()
+
+    # ------------------------------------------------------------------
+    # Positioning
+    # ------------------------------------------------------------------
+
+    def show_at(self, preferred_top_left: "QPoint") -> None:
+        """Show the popup near ``preferred_top_left``, clamped to its screen.
+
+        If the preferred position would spill the popup off the right or
+        bottom edge, slide it back into view so it remains fully visible.
+        Uses the screen that contains the preferred point so multi-monitor
+        setups behave sanely.
+        """
+        self.adjustSize()
+        size = self.size()
+        screen = QGuiApplication.screenAt(preferred_top_left) or QGuiApplication.primaryScreen()
+        avail: QRect = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+
+        x = preferred_top_left.x()
+        y = preferred_top_left.y()
+        if x + size.width() > avail.right():
+            x = avail.right() - size.width()
+        if y + size.height() > avail.bottom():
+            y = avail.bottom() - size.height()
+        if x < avail.left():
+            x = avail.left()
+        if y < avail.top():
+            y = avail.top()
+
+        self.move(x, y)
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
 
 class CategoryGridDelegate(QStyledItemDelegate):
@@ -151,7 +235,6 @@ class CategoryGridDelegate(QStyledItemDelegate):
 
         picker = CategoryGridPicker(current=str(current))
         global_pos = parent.mapToGlobal(option.rect.bottomLeft())
-        picker.move(global_pos)
 
         model = index.model()
         persistent = QPersistentModelIndex(index)
@@ -167,9 +250,7 @@ class CategoryGridDelegate(QStyledItemDelegate):
         picker.category_selected.connect(_commit)
         # Keep the picker alive until the placeholder is destroyed.
         placeholder._picker = picker  # type: ignore[attr-defined]
-        picker.show()
-        picker.raise_()
-        picker.activateWindow()
+        picker.show_at(global_pos)
         return placeholder
 
     def setEditorData(self, editor: QWidget, index: QModelIndex) -> None:  # noqa: N802

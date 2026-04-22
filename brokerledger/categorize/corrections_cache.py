@@ -139,8 +139,13 @@ def sync_into_db(session: Session) -> int:
 
     Orphaned client-scoped entries (whose ``client_id`` no longer exists —
     typically because the client was deleted after the correction was cached)
-    are skipped to avoid a FOREIGN KEY constraint failure that would otherwise
-    brick startup. A warning is logged so the broker can spot stale cache rows.
+    used to be skipped on every startup and logged as a warning.  They are
+    now pruned from the JSON file in-place so the warning fires at most once
+    per orphaned entry — subsequent startups are clean.
+
+    Promoting an orphaned client-scoped rule to the global scope would change
+    categorisation behaviour for other clients, so we drop the entries
+    entirely rather than rewriting their scope.
     """
     entries = load()
     if not entries:
@@ -149,7 +154,8 @@ def sync_into_db(session: Session) -> int:
         session.execute(select(Client.id)).scalars().all()
     )
     inserted = 0
-    skipped_orphans = 0
+    orphans_pruned = 0
+    kept: list[dict[str, Any]] = []
     now = utcnow()
     for e in entries:
         merchant = (e.get("merchant") or "").strip()
@@ -157,10 +163,13 @@ def sync_into_db(session: Session) -> int:
         scope = (e.get("scope") or "").strip()
         client_id = e.get("client_id")
         if not merchant or not category or scope not in {"client", "global"}:
+            # Keep malformed entries out of the pruned file too.
+            orphans_pruned += 1
             continue
         if scope == "client" and client_id not in live_client_ids:
-            skipped_orphans += 1
+            orphans_pruned += 1
             continue
+        kept.append(e)
         existing = session.execute(
             select(MerchantRule).where(
                 MerchantRule.merchant_normalized == merchant,
@@ -183,11 +192,18 @@ def sync_into_db(session: Session) -> int:
             last_seen_at=now,
         ))
         inserted += 1
-    if skipped_orphans:
-        logger.warning(
-            "Corrections cache: skipped {} entries referencing deleted clients",
-            skipped_orphans,
+    if orphans_pruned:
+        # One-line INFO (not WARNING) — now that we prune, this is expected
+        # housekeeping the first time a user starts up after deleting clients.
+        logger.info(
+            "Corrections cache: pruned {} stale entr{}",
+            orphans_pruned,
+            "y" if orphans_pruned == 1 else "ies",
         )
+        try:
+            _atomic_write(kept)
+        except OSError as e:
+            logger.warning("Could not rewrite corrections cache after prune: {}", e)
     if inserted:
         session.commit()
     return inserted
