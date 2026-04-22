@@ -43,22 +43,33 @@ from ..auth.service import (
     set_user_active,
     update_user,
 )
-from ..auth.session import require_admin
+from ..auth.session import can_manage_user, get_current, require_admin, require_login
 from ..db.engine import session_scope
 from ..db.models import User
 from ..users import service as users_service
 from .widgets.avatar import AvatarLabel
+from .widgets.password_field import PasswordField, PasswordPair
 
 
 class _UserDialog(QDialog):
-    """Shared create/edit dialog. Pass ``existing=`` to edit."""
+    """Shared create/edit dialog. Pass ``existing=`` to edit.
+
+    ``allowed_roles`` restricts which roles the role dropdown offers — used so
+    brokers can only create ``admin_staff`` users.  Defaults to all three.
+    """
 
     _ERR_STYLE = "QLineEdit { border: 2px solid #A52D1E; background: #FFF5F3; }"
     _OK_STYLE  = ""
 
-    def __init__(self, parent=None, *, existing: User | None = None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        *,
+        existing: User | None = None,
+        allowed_roles: tuple[str, ...] = ("broker", "admin_staff", "admin"),
+    ) -> None:
         super().__init__(parent)
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(440)
         self.setWindowTitle("Edit user" if existing else "New user")
         self._existing = existing
 
@@ -72,20 +83,23 @@ class _UserDialog(QDialog):
         self.username = QLineEdit()
         self.username.setPlaceholderText("Short handle, e.g. 'jsmith'")
         self.role = QComboBox()
-        # "admin" is super-admin (can delete, see all data).
-        # "admin_staff" is support staff allocated to one or more brokers.
-        # "broker" owns their own clients.
-        self.role.addItems(["broker", "admin_staff", "admin"])
-        self.password = QLineEdit()
-        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.role.addItems(list(allowed_roles))
+        # Disable the role dropdown entirely when there's nothing to pick from
+        # (e.g. brokers creating admin_staff — only one choice).
+        if len(allowed_roles) == 1:
+            self.role.setEnabled(False)
+        # Password pair (new + confirm) with show/hide toggle.
+        self.password_pair = PasswordPair(
+            label_new="Password", label_confirm="Confirm password",
+        )
         if existing is not None:
             self.full_name.setText(existing.full_name or "")
             self.email.setText(existing.email or "")
             self.username.setText(existing.username)
-            self.role.setCurrentText(existing.role)
-            self.password.setPlaceholderText("Leave blank to keep current password")
+            if self.role.findText(existing.role) >= 0:
+                self.role.setCurrentText(existing.role)
+            self.password_pair.set_required_hint("Leave blank to keep current password")
 
-        # Inline error labels — hidden until validation fires.
         self._err_username = QLabel("")
         self._err_username.setStyleSheet("color:#A52D1E;font-size:11px;")
         self._err_username.setVisible(False)
@@ -93,16 +107,15 @@ class _UserDialog(QDialog):
         self._err_password.setStyleSheet("color:#A52D1E;font-size:11px;")
         self._err_password.setVisible(False)
 
-        # Clear error styling when the user edits the field.
         self.username.textChanged.connect(lambda: self._clear_err(self.username, self._err_username))
-        self.password.textChanged.connect(lambda: self._clear_err(self.password, self._err_password))
+        self.password_pair.mismatch_changed.connect(self._on_pw_mismatch)
 
         form.addRow("Full name", self.full_name)
         form.addRow("Email (used to log in)", self.email)
         form.addRow("Username", self.username)
         form.addRow("", self._err_username)
         form.addRow("Role", self.role)
-        form.addRow("Password", self.password)
+        form.addRow(self.password_pair)
         form.addRow("", self._err_password)
 
         btns = QDialogButtonBox(
@@ -122,33 +135,35 @@ class _UserDialog(QDialog):
         label.setVisible(True)
         field.setFocus()
 
+    def _password_error(self, message: str) -> None:
+        self._err_password.setText(message)
+        self._err_password.setVisible(True)
+        self.password_pair.setFocus()
+
     def _clear_err(self, field: QLineEdit, label: QLabel) -> None:
         field.setStyleSheet(self._OK_STYLE)
         label.setVisible(False)
 
+    def _on_pw_mismatch(self, mismatch: bool) -> None:
+        if not mismatch:
+            self._err_password.setVisible(False)
+
     def accept(self) -> None:  # noqa: A003
         from ..config import get_settings
         username = self.username.text().strip()
-        pw = self.password.text()
 
         if not username:
             self._field_error(self.username, self._err_username, "Username is required.")
             return
 
         is_new = self._existing is None
-        if is_new and not pw:
-            self._field_error(self.password, self._err_password, "Password is required for new users.")
+        ok, err = self.password_pair.is_valid(
+            min_length=get_settings().password_min_length,
+            required=is_new,
+        )
+        if not ok:
+            self._password_error(err)
             return
-
-        if pw:  # only validate when a password was actually entered
-            min_len = get_settings().password_min_length
-            if len(pw) < min_len:
-                self._field_error(
-                    self.password, self._err_password,
-                    f"Password must be at least {min_len} characters — please try again.",
-                )
-                self.password.clear()
-                return
 
         super().accept()
 
@@ -158,8 +173,14 @@ class _UserDialog(QDialog):
             "email": self.email.text().strip(),
             "username": self.username.text().strip(),
             "role": self.role.currentText(),
-            "password": self.password.text(),
+            "password": self.password_pair.value(),
         }
+
+    # Backwards-compat hooks for external error callers.
+    @property
+    def password(self) -> PasswordPair:  # noqa: D401
+        """Password pair (used by outer code when showing server errors)."""
+        return self.password_pair
 
 
 class _BrokerAllocationsDialog(QDialog):
@@ -220,7 +241,7 @@ class _BrokerAllocationsDialog(QDialog):
 class _ResolveResetDialog(QDialog):
     def __init__(self, email: str, parent=None) -> None:
         super().__init__(parent)
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(460)
         self.setWindowTitle("Resolve password reset")
         form = QFormLayout(self)
         form.setSpacing(10)
@@ -229,15 +250,27 @@ class _ResolveResetDialog(QDialog):
             f"<p>Reset the password for <b>{email}</b>.<br>"
             "Tell the user the new password out-of-band (in person, secure chat, etc).</p>"
         ))
-        self.password = QLineEdit()
-        self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        form.addRow("New password", self.password)
+        self.password_pair = PasswordPair(
+            label_new="New password", label_confirm="Confirm password",
+        )
+        form.addRow(self.password_pair)
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        btns.accepted.connect(self.accept)
+        btns.accepted.connect(self._try_accept)
         btns.rejected.connect(self.reject)
         form.addRow(btns)
+
+    def _try_accept(self) -> None:
+        from ..config import get_settings
+        ok, _err = self.password_pair.is_valid(
+            min_length=get_settings().password_min_length, required=True,
+        )
+        if ok:
+            self.accept()
+
+    def password(self) -> str:
+        return self.password_pair.value()
 
 
 class AdminUsersView(QWidget):
@@ -254,43 +287,44 @@ class AdminUsersView(QWidget):
         back.clicked.connect(self.back_requested.emit)
         header.addWidget(back)
         header.addSpacing(12)
-        header.addWidget(QLabel("<h1>Users</h1>"))
+        self.title_label = QLabel("<h1>Manage staff</h1>")
+        header.addWidget(self.title_label)
         header.addStretch(1)
         outer.addLayout(header)
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
-        new_btn = QPushButton("+ New user")
-        new_btn.clicked.connect(self._new_user)
-        actions.addWidget(new_btn)
-        edit_btn = QPushButton("Edit…")
-        edit_btn.clicked.connect(self._edit_selected)
-        actions.addWidget(edit_btn)
-        pwd_btn = QPushButton("Reset password…")
-        pwd_btn.clicked.connect(self._reset_password)
-        actions.addWidget(pwd_btn)
-        photo_btn = QPushButton("Change photo…")
-        photo_btn.clicked.connect(self._change_photo)
-        actions.addWidget(photo_btn)
-        remove_photo_btn = QPushButton("Remove photo")
-        remove_photo_btn.setObjectName("GhostButton")
-        remove_photo_btn.clicked.connect(self._remove_photo)
-        actions.addWidget(remove_photo_btn)
-        toggle_btn = QPushButton("Enable / Disable")
-        toggle_btn.setObjectName("GhostButton")
-        toggle_btn.clicked.connect(self._toggle_active)
-        actions.addWidget(toggle_btn)
-        allocs_btn = QPushButton("Broker allocations…")
-        allocs_btn.setToolTip(
+        self.new_btn = QPushButton("+ New user")
+        self.new_btn.clicked.connect(self._new_user)
+        actions.addWidget(self.new_btn)
+        self.edit_btn = QPushButton("Edit…")
+        self.edit_btn.clicked.connect(self._edit_selected)
+        actions.addWidget(self.edit_btn)
+        self.pwd_btn = QPushButton("Reset password…")
+        self.pwd_btn.clicked.connect(self._reset_password)
+        actions.addWidget(self.pwd_btn)
+        self.photo_btn = QPushButton("Change photo…")
+        self.photo_btn.clicked.connect(self._change_photo)
+        actions.addWidget(self.photo_btn)
+        self.remove_photo_btn = QPushButton("Remove photo")
+        self.remove_photo_btn.setObjectName("GhostButton")
+        self.remove_photo_btn.clicked.connect(self._remove_photo)
+        actions.addWidget(self.remove_photo_btn)
+        self.toggle_btn = QPushButton("Enable / Disable")
+        self.toggle_btn.setObjectName("GhostButton")
+        self.toggle_btn.clicked.connect(self._toggle_active)
+        actions.addWidget(self.toggle_btn)
+        self.allocs_btn = QPushButton("Broker allocations…")
+        self.allocs_btn.setToolTip(
             "Admin-staff users must be allocated to one or more brokers. "
             "They see only those brokers' clients."
         )
-        allocs_btn.clicked.connect(self._edit_allocations)
-        actions.addWidget(allocs_btn)
-        delete_btn = QPushButton("Delete…")
-        delete_btn.setObjectName("GhostButton")
-        delete_btn.clicked.connect(self._delete_selected)
-        actions.addWidget(delete_btn)
+        self.allocs_btn.clicked.connect(self._edit_allocations)
+        actions.addWidget(self.allocs_btn)
+        self.delete_btn = QPushButton("Delete…")
+        self.delete_btn.setObjectName("GhostButton")
+        self.delete_btn.clicked.connect(self._delete_selected)
+        actions.addWidget(self.delete_btn)
         actions.addStretch(1)
         outer.addLayout(actions)
 
@@ -321,7 +355,8 @@ class AdminUsersView(QWidget):
         splitter.addWidget(users_box)
 
         # ---- Pending reset requests --------------------------------------
-        reset_box = QWidget()
+        self.reset_box = QWidget()
+        reset_box = self.reset_box
         reset_layout = QVBoxLayout(reset_box)
         reset_layout.setContentsMargins(0, 8, 0, 0)
         reset_header = QHBoxLayout()
@@ -360,44 +395,64 @@ class AdminUsersView(QWidget):
     # ---- Data loading ----------------------------------------------------
 
     def refresh(self) -> None:
-        require_admin()
-        with session_scope() as s:
-            users = s.execute(select(User).order_by(User.username.asc())).scalars().all()
-            rows = [
-                (
-                    u.id, u.username, u.email, u.full_name, u.role, u.is_active, u.photo_path
-                )
-                for u in users
-            ]
-        self.table.setRowCount(len(rows))
-        for row, (uid, username, email, full_name, role, active, photo) in enumerate(rows):
+        actor = require_login()
+        if actor.role not in ("admin", "broker"):
+            raise PermissionError("Only administrators and brokers can manage staff.")
+
+        is_admin = actor.role == "admin"
+        # Only admins can delete users, manage broker allocations, or see
+        # pending password-reset requests from the login screen.
+        self.delete_btn.setVisible(is_admin)
+        self.allocs_btn.setVisible(is_admin)
+        if hasattr(self, "reset_box"):
+            self.reset_box.setVisible(is_admin)
+        self.title_label.setText(
+            "<h1>Manage staff</h1>" if is_admin else "<h1>My staff</h1>"
+        )
+
+        manageable = users_service.list_manageable_users(actor)
+        self.table.setRowCount(len(manageable))
+        for row, u in enumerate(manageable):
             avatar = AvatarLabel(size=40)
-            avatar.set_photo(photo, username or "", full_name)
+            avatar.set_photo(u.photo_path, u.username or "", u.full_name)
             self.table.setCellWidget(row, 0, avatar)
-            self.table.setItem(row, 1, QTableWidgetItem(full_name or ""))
-            self.table.setItem(row, 2, QTableWidgetItem(email or ""))
-            self.table.setItem(row, 3, QTableWidgetItem(username))
-            self.table.setItem(row, 4, QTableWidgetItem(role))
-            self.table.setItem(row, 5, QTableWidgetItem("Yes" if active else "No"))
-            id_item = QTableWidgetItem(str(uid))
+            self.table.setItem(row, 1, QTableWidgetItem(u.full_name or ""))
+            self.table.setItem(row, 2, QTableWidgetItem(""))  # email hidden for brokers; see below
+            self.table.setItem(row, 3, QTableWidgetItem(u.username))
+            self.table.setItem(row, 4, QTableWidgetItem(u.role))
+            self.table.setItem(row, 5, QTableWidgetItem("Yes" if u.is_active else "No"))
+            id_item = QTableWidgetItem(str(u.id))
             id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row, 6, id_item)
 
-        # Reset requests.
-        pending = list_pending_requests()
-        self.reset_title.setText(
-            f"<b>Pending password-reset requests</b>"
-            + (f"  <span style='color:#A52D1E'>({len(pending)})</span>" if pending else "")
-        )
-        self.reset_table.setRowCount(len(pending))
-        for row, r in enumerate(pending):
-            self.reset_table.setItem(row, 0, QTableWidgetItem(r.created_at.strftime("%Y-%m-%d %H:%M")))
-            self.reset_table.setItem(row, 1, QTableWidgetItem(r.email_submitted))
-            self.reset_table.setItem(row, 2, QTableWidgetItem(r.username or "(no match)"))
-            self.reset_table.setItem(row, 3, QTableWidgetItem(r.note or ""))
-            id_item = QTableWidgetItem(str(r.id))
-            id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.reset_table.setItem(row, 4, id_item)
+        # Fill in email column for visible users — a second cheap query keeps
+        # UserRow dataclass unchanged.
+        if manageable:
+            ids = [u.id for u in manageable]
+            with session_scope() as s:
+                rows = s.execute(
+                    select(User.id, User.email).where(User.id.in_(ids))
+                ).all()
+            email_map = {r[0]: (r[1] or "") for r in rows}
+            for row, u in enumerate(manageable):
+                self.table.item(row, 2).setText(email_map.get(u.id, ""))
+
+        # Pending reset requests — admins only.
+        if is_admin:
+            pending = list_pending_requests()
+            self.reset_title.setText(
+                f"<b>Pending password-reset requests</b>"
+                + (f"  <span style='color:#A52D1E'>({len(pending)})</span>" if pending else "")
+            )
+            self.reset_table.setRowCount(len(pending))
+            for row, r in enumerate(pending):
+                self.reset_table.setItem(row, 0, QTableWidgetItem(r.created_at.strftime("%Y-%m-%d %H:%M")))
+                self.reset_table.setItem(row, 1, QTableWidgetItem(r.email_submitted))
+                self.reset_table.setItem(row, 2, QTableWidgetItem(r.username or "(no match)"))
+                self.reset_table.setItem(row, 3, QTableWidgetItem(r.note or ""))
+                id_item = QTableWidgetItem(str(r.id))
+                id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.reset_table.setItem(row, 4, id_item)
 
     def _selected_user_id(self) -> int | None:
         row = self.table.currentRow()
@@ -406,6 +461,15 @@ class AdminUsersView(QWidget):
         try:
             return int(self.table.item(row, 6).text())
         except (AttributeError, ValueError):
+            return None
+
+    def _selected_user_role(self) -> str | None:
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        try:
+            return self.table.item(row, 4).text()
+        except AttributeError:
             return None
 
     def _selected_request_id(self) -> int | None:
@@ -420,19 +484,32 @@ class AdminUsersView(QWidget):
     # ---- Actions: users --------------------------------------------------
 
     def _new_user(self) -> None:
-        dlg = _UserDialog(self)
+        actor_cu = require_login()
+        # Brokers can only create admin_staff; admins can create any role.
+        allowed_roles = (
+            ("admin_staff",)
+            if actor_cu.role == "broker"
+            else ("broker", "admin_staff", "admin")
+        )
+        dlg = _UserDialog(self, allowed_roles=allowed_roles)
+        new_user_id: int | None = None
         while True:
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
             v = dlg.values()
+            if actor_cu.role == "broker" and v["role"] != "admin_staff":
+                QMessageBox.warning(
+                    self, "Role not allowed",
+                    "Brokers can only create admin_staff accounts.",
+                )
+                continue
             try:
-                actor = require_admin()
-                create_user(
+                new_user_id = create_user(
                     v["username"], v["password"],
                     role=v["role"],
                     full_name=v["full_name"] or None,
                     email=v["email"] or None,
-                    actor_id=actor.id,
+                    actor_id=actor_cu.id,
                 )
                 break
             except AuthError as e:
@@ -441,17 +518,37 @@ class AdminUsersView(QWidget):
                 if "username" in low or "already" in low or "taken" in low:
                     dlg._field_error(dlg.username, dlg._err_username, err)
                 elif "password" in low:
-                    dlg._field_error(dlg.password, dlg._err_password, err)
-                    dlg.password.clear()
+                    dlg._password_error(err)
+                    dlg.password_pair.clear()
                 else:
                     QMessageBox.warning(self, "Could not create user", err)
                     return
+        # Auto-allocate newly created admin_staff users to the broker that
+        # created them so they immediately see the broker's clients.
+        if new_user_id is not None:
+            actor = get_current()
+            if actor is not None and actor.role == "broker" and v["role"] == "admin_staff":
+                try:
+                    users_service.allocate_admin_staff_to_broker(new_user_id, actor.id)
+                except ValueError as e:
+                    QMessageBox.warning(
+                        self, "Allocation failed",
+                        f"User created but allocation to you failed: {e}",
+                    )
         self.refresh()
 
     def _edit_selected(self) -> None:
         uid = self._selected_user_id()
         if uid is None:
             QMessageBox.information(self, "No selection", "Select a user first.")
+            return
+        actor = require_login()
+        target_role = self._selected_user_role()
+        if target_role is None or not can_manage_user(actor, target_role, uid):
+            QMessageBox.warning(
+                self, "Not allowed",
+                "You don't have permission to edit this user.",
+            )
             return
         with session_scope() as s:
             u = s.get(User, uid)
@@ -462,7 +559,13 @@ class AdminUsersView(QWidget):
                 role=u.role, full_name=u.full_name,
                 password_hash=u.password_hash,
             )
-        dlg = _UserDialog(self, existing=snapshot)
+        # Brokers can only edit admin_staff; role dropdown is locked.
+        allowed_roles = (
+            ("admin_staff",)
+            if actor.role == "broker"
+            else ("broker", "admin_staff", "admin")
+        )
+        dlg = _UserDialog(self, existing=snapshot, allowed_roles=allowed_roles)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         v = dlg.values()
@@ -487,6 +590,14 @@ class AdminUsersView(QWidget):
         uid = self._selected_user_id()
         if uid is None:
             return
+        try:
+            actor = require_admin()
+        except PermissionError:
+            QMessageBox.warning(
+                self, "Administrators only",
+                "Only administrators can delete user accounts.",
+            )
+            return
         if QMessageBox.question(
             self, "Delete user",
             "Permanently delete this user account? Their audit-log entries remain "
@@ -494,7 +605,6 @@ class AdminUsersView(QWidget):
         ) != QMessageBox.StandardButton.Yes:
             return
         try:
-            actor = require_admin()
             delete_user(uid, actor_id=actor.id)
         except AuthError as e:
             QMessageBox.warning(self, "Could not delete user", str(e))
@@ -502,30 +612,57 @@ class AdminUsersView(QWidget):
         self.refresh()
 
     def _reset_password(self) -> None:
+        from ..config import get_settings
         uid = self._selected_user_id()
         if uid is None:
             QMessageBox.information(self, "No selection", "Select a user first.")
             return
+        # Permission check — use the manageability helper so brokers can reset
+        # passwords for their own admin_staff but not for other users.
+        actor = require_login()
+        target_role = self._selected_user_role()
+        if target_role is None or not can_manage_user(actor, target_role, uid):
+            QMessageBox.warning(
+                self, "Not allowed",
+                "You don't have permission to reset this user's password.",
+            )
+            return
+
         dlg = QDialog(self)
-        dlg.setMinimumWidth(400)
+        dlg.setMinimumWidth(440)
         dlg.setWindowTitle("Reset password")
         form = QFormLayout(dlg)
         form.setContentsMargins(16, 16, 16, 16)
         form.setSpacing(10)
-        pw = QLineEdit()
-        pw.setEchoMode(QLineEdit.EchoMode.Password)
-        form.addRow("New password", pw)
+        pair = PasswordPair(
+            label_new="New password", label_confirm="Confirm password",
+        )
+        form.addRow(pair)
+        err_lbl = QLabel("")
+        err_lbl.setStyleSheet("color:#A52D1E;font-size:11px;")
+        err_lbl.setVisible(False)
+        form.addRow("", err_lbl)
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        btns.accepted.connect(dlg.accept)
+
+        def _try_accept() -> None:
+            ok, msg = pair.is_valid(
+                min_length=get_settings().password_min_length, required=True,
+            )
+            if ok:
+                dlg.accept()
+            else:
+                err_lbl.setText(msg)
+                err_lbl.setVisible(True)
+
+        btns.accepted.connect(_try_accept)
         btns.rejected.connect(dlg.reject)
         form.addRow(btns)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         try:
-            actor = require_admin()
-            change_password(uid, pw.text(), actor_id=actor.id)
+            change_password(uid, pair.value(), actor_id=actor.id)
         except AuthError as e:
             QMessageBox.warning(self, "Could not reset password", str(e))
             return
@@ -625,7 +762,7 @@ class AdminUsersView(QWidget):
             return
         try:
             actor = require_admin()
-            resolve_request(rid, dlg.password.text(), actor_id=actor.id)
+            resolve_request(rid, dlg.password(), actor_id=actor.id)
         except AuthError as e:
             QMessageBox.warning(self, "Could not resolve", str(e))
             return

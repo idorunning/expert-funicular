@@ -207,6 +207,7 @@ class SettingsView(QWidget):
         layout.addLayout(header)
 
         layout.addWidget(self._build_profile_panel())
+        layout.addWidget(self._build_password_panel())
         layout.addWidget(self._build_ai_panel())
         layout.addWidget(self._build_web_lookup_panel())
         layout.addWidget(self._build_thresholds_panel())
@@ -297,6 +298,66 @@ class SettingsView(QWidget):
         self.profile_name.setText(cu.full_name or cu.username)
         self.profile_meta.setText(f"{cu.username} · {cu.role}")
         self.avatar.set_photo(cu.photo_path, cu.username, cu.full_name)
+
+    # ---- Change my password ---------------------------------------------
+
+    def _build_password_panel(self) -> QGroupBox:
+        from .widgets.password_field import PasswordField, PasswordPair
+        box = QGroupBox("Change my password")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(12, 18, 12, 12)
+        layout.setSpacing(8)
+
+        intro = QLabel(
+            "Update the password you use to log in.  You'll be signed out on "
+            "other devices the next time you log in there."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("QLabel { color: #6B6679; }")
+        layout.addWidget(intro)
+
+        old_lbl = QLabel("Current password")
+        layout.addWidget(old_lbl)
+        self._pw_old = PasswordField(placeholder="Current password")
+        layout.addWidget(self._pw_old)
+
+        self._pw_new = PasswordPair(
+            label_new="New password", label_confirm="Confirm new password",
+        )
+        layout.addWidget(self._pw_new)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        save_btn = QPushButton("Update password")
+        save_btn.clicked.connect(self._change_own_password)
+        row.addWidget(save_btn)
+        layout.addLayout(row)
+
+        return box
+
+    def _change_own_password(self) -> None:
+        from ..auth.service import AuthError, InvalidCredentials, change_own_password
+        old = self._pw_old.text()
+        if not old:
+            QMessageBox.warning(self, "Current password", "Please enter your current password.")
+            return
+        ok, err = self._pw_new.is_valid(
+            min_length=get_settings().password_min_length, required=True,
+        )
+        if not ok:
+            QMessageBox.warning(self, "New password", err)
+            return
+        try:
+            change_own_password(old, self._pw_new.value())
+        except InvalidCredentials as e:
+            QMessageBox.warning(self, "Current password incorrect", str(e))
+            return
+        except AuthError as e:
+            QMessageBox.warning(self, "Could not update password", str(e))
+            return
+        self._pw_old.clear()
+        self._pw_new.clear()
+        QMessageBox.information(self, "Password updated", "Your password has been changed.")
 
     # ---- AI management ---------------------------------------------------
 

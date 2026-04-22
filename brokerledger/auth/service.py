@@ -14,7 +14,7 @@ from ..db.models import AuditLog, User, utcnow
 from .hashing import hash_password, needs_rehash, verify_password
 from .session import CurrentUser, get_current, set_current
 
-ROLES = ("admin", "broker")
+ROLES = ("admin", "broker", "admin_staff")
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -199,6 +199,24 @@ def change_password(user_id: int, new_password: str, actor_id: int | None = None
         u.locked_until = None
         s.add(AuditLog(user_id=actor_id, action="change_password", entity_type="user", entity_id=user_id))
         s.commit()
+
+
+def change_own_password(old_password: str, new_password: str) -> None:
+    """Self-service password change.  Verifies the current password before
+    rotating.  Raises :class:`InvalidCredentials` if the old password is wrong.
+    """
+    current = get_current()
+    if current is None:
+        raise AuthError("Login required")
+    with session_scope() as s:
+        u = s.get(User, current.id)
+        if u is None:
+            raise AuthError("User not found")
+        if not verify_password(u.password_hash, old_password):
+            raise InvalidCredentials("Current password is incorrect")
+    # Delegate the write (and audit) to the shared helper. ``actor_id`` is the
+    # user themselves because this is self-service.
+    change_password(current.id, new_password, actor_id=current.id)
 
 
 def login(identifier: str, password: str) -> CurrentUser:

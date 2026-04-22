@@ -23,6 +23,7 @@ from ..config import get_settings
 from ..db import app_settings
 from .dialogs.legal_dialog import LegalDialog
 from .theme import load_logo_pixmap
+from .widgets.password_field import PasswordPair
 
 
 class FirstRunDialog(QDialog):
@@ -61,12 +62,10 @@ class FirstRunDialog(QDialog):
         self.username = QLineEdit()
         self.username.setText("admin")
         form.addRow("Username", self.username)
-        self.password = QLineEdit()
-        self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        form.addRow("Password", self.password)
-        self.password2 = QLineEdit()
-        self.password2.setEchoMode(QLineEdit.EchoMode.Password)
-        form.addRow("Confirm password", self.password2)
+        self.password_pair = PasswordPair(
+            label_new="Password", label_confirm="Confirm password",
+        )
+        form.addRow(self.password_pair)
         layout.addLayout(form)
 
         self.ollama_status = QLabel("Checking Ollama…")
@@ -132,18 +131,22 @@ class FirstRunDialog(QDialog):
                 "Agreement to continue."
             )
             return
-        if self.password.text() != self.password2.text():
-            QMessageBox.warning(self, "Passwords don't match", "Please re-enter the password.")
+        ok, err = self.password_pair.is_valid(
+            min_length=get_settings().password_min_length, required=True,
+        )
+        if not ok:
+            QMessageBox.warning(self, "Password", err)
             return
+        password = self.password_pair.value()
         try:
             create_user(
                 self.username.text().strip(),
-                self.password.text(),
+                password,
                 role="admin",
                 full_name=self.full_name.text().strip() or None,
                 email=self.email.text().strip() or None,
             )
-            login(self.username.text().strip(), self.password.text())
+            login(self.username.text().strip(), password)
         except AuthError as e:
             QMessageBox.warning(self, "Could not create admin", str(e))
             return

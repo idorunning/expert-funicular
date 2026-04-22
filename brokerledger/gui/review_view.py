@@ -670,6 +670,11 @@ class ReviewView(QWidget):
         self.model.dataChanged.connect(lambda *_: self._maybe_prompt_siblings())
         self.table.selectionModel().selectionChanged.connect(self._on_selection_changed)
 
+        # Sticky flag — once we've seen a flagged transaction we remember it
+        # so the banner can flip to its "all clear" state when the last flag
+        # is cleared, rather than silently disappearing.
+        self._ever_had_flags = False
+
         self.refresh_summary()
 
         # Apply initial filter state without retriggering signals.
@@ -677,14 +682,6 @@ class ReviewView(QWidget):
             self.flag_only.blockSignals(True)
             self.flag_only.setChecked(True)
             self.flag_only.blockSignals(False)
-
-        if flagged_count is not None and flagged_count > 0:
-            noun = "transaction" if flagged_count == 1 else "transactions"
-            self.flagged_banner.setText(
-                f"⚑ {flagged_count} {noun} need your review. "
-                "Everything else was assigned automatically with high certainty."
-            )
-            self.flagged_banner.setVisible(True)
 
     # ------------------------------------------------------------------
     # Toolbar actions
@@ -832,6 +829,42 @@ class ReviewView(QWidget):
     # Summary bar
     # ------------------------------------------------------------------
 
+    _BANNER_RED_QSS = (
+        "QLabel { background-color: #F5E6F0; color: #5A1044;"
+        " border: 1px solid #C33E8F; border-radius: 6px;"
+        " padding: 10px 14px; font-weight: 600; }"
+    )
+    _BANNER_GREEN_QSS = (
+        "QLabel { background-color: #E6F4EA; color: #145f28;"
+        " border: 1px solid #6AC87A; border-radius: 6px;"
+        " padding: 10px 14px; font-weight: 600; }"
+    )
+
+    def _update_banner(self, flagged: int) -> None:
+        """Drive the red/green review banner from the current flag count.
+
+        * flagged > 0 → red banner with the count, sticky state recorded.
+        * flagged == 0 and we've previously seen flags → green "all clear".
+        * Otherwise (nothing ever flagged) → hidden.
+        """
+        if flagged > 0:
+            self._ever_had_flags = True
+            noun = "transaction" if flagged == 1 else "transactions"
+            self.flagged_banner.setText(
+                f"⚑ {flagged} {noun} need your review. "
+                "Everything else was assigned automatically with high certainty."
+            )
+            self.flagged_banner.setStyleSheet(self._BANNER_RED_QSS)
+            self.flagged_banner.setVisible(True)
+        elif self._ever_had_flags:
+            self.flagged_banner.setText(
+                "✓ All flagged transactions have been reviewed — nicely done!"
+            )
+            self.flagged_banner.setStyleSheet(self._BANNER_GREEN_QSS)
+            self.flagged_banner.setVisible(True)
+        else:
+            self.flagged_banner.setVisible(False)
+
     def refresh_summary(self) -> None:
         with session_scope() as s:
             total = s.execute(
@@ -849,13 +882,4 @@ class ReviewView(QWidget):
             f"<span style='color:#a52d1e'><b>{tiers['Low']}</b> low</span> &middot; "
             f"<b style='color:#b4580a'>{flagged} flagged</b></span>"
         )
-        # Update the banner count if it's still visible.
-        if self.flagged_banner.isVisible() and flagged == 0:
-            self.flagged_banner.setText(
-                "✓ All flagged transactions have been reviewed — nicely done!"
-            )
-            self.flagged_banner.setStyleSheet(
-                "QLabel { background-color: #E6F4EA; color: #145f28;"
-                " border: 1px solid #6AC87A; border-radius: 6px;"
-                " padding: 10px 14px; font-weight: 600; }"
-            )
+        self._update_banner(flagged)

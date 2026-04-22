@@ -7,7 +7,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from .. import paths
-from ..auth.session import require_admin
+from ..auth.session import CurrentUser, require_admin, require_login
 from ..db.engine import session_scope
 from ..db.models import AdminBrokerAssignment, AuditLog, User, utcnow
 
@@ -143,6 +143,67 @@ def get_admin_broker_ids(admin_user_id: int) -> list[int]:
             )
         ).all()
         return sorted(r[0] for r in rows)
+
+
+def list_manageable_users(actor: CurrentUser | None = None) -> list[UserRow]:
+    """Users that ``actor`` (default: current user) is allowed to manage.
+
+    * Admins see every user.
+    * Brokers see only the admin_staff users currently allocated to them.
+    * Admin staff see nobody (the management UI is hidden for them anyway).
+    """
+    if actor is None:
+        actor = require_login()
+    with session_scope() as s:
+        if actor.role == "admin":
+            q = select(User).order_by(User.username)
+        elif actor.role == "broker":
+            q = (
+                select(User)
+                .join(
+                    AdminBrokerAssignment,
+                    AdminBrokerAssignment.admin_user_id == User.id,
+                )
+                .where(
+                    AdminBrokerAssignment.broker_user_id == actor.id,
+                    User.role == "admin_staff",
+                )
+                .order_by(User.username)
+            )
+        else:
+            return []
+        return [_row(u) for u in s.execute(q).scalars().all()]
+
+
+def allocate_admin_staff_to_broker(admin_user_id: int, broker_id: int) -> None:
+    """Idempotently record that ``admin_user_id`` supports ``broker_id``.
+
+    Used immediately after a broker creates an admin_staff account so the new
+    user is already scoped to the creating broker's clients.  Safe to call on
+    an allocation that already exists.
+    """
+    require_login()
+    with session_scope() as s:
+        admin = s.get(User, admin_user_id)
+        broker = s.get(User, broker_id)
+        if admin is None or admin.role != "admin_staff":
+            raise ValueError("Target user is not admin_staff.")
+        if broker is None or broker.role != "broker":
+            raise ValueError("Target broker is not a broker.")
+        existing = s.execute(
+            select(AdminBrokerAssignment).where(
+                AdminBrokerAssignment.admin_user_id == admin_user_id,
+                AdminBrokerAssignment.broker_user_id == broker_id,
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return
+        s.add(AdminBrokerAssignment(
+            admin_user_id=admin_user_id,
+            broker_user_id=broker_id,
+            created_at=utcnow(),
+        ))
+        s.commit()
 
 
 def set_admin_broker_ids(admin_user_id: int, broker_ids: list[int]) -> None:

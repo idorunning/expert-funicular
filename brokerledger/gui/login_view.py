@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from ..auth.password_reset import submit_reset_request
 from ..auth.service import AuthError, InvalidCredentials, login
 from .theme import load_logo_pixmap
+from .widgets.password_field import PasswordField
 
 
 class _ForgotPasswordDialog(QDialog):
@@ -115,9 +116,7 @@ class LoginView(QWidget):
         self.identifier.setPlaceholderText("you@example.com or username")
         form.addRow("Email or username", self.identifier)
 
-        self.password = QLineEdit()
-        self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password.setPlaceholderText("Password")
+        self.password = PasswordField(placeholder="Password")
         form.addRow("Password", self.password)
 
         self.login_btn = QPushButton("Log in")

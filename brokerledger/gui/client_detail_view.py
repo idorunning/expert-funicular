@@ -181,6 +181,7 @@ class ClientDetailView(QWidget):
 
         layout.addWidget(self._build_statements_panel())
         layout.addWidget(self._build_affordability_panel())
+        layout.addWidget(self._build_exports_panel())
         layout.addStretch(1)
 
         self.refresh()
@@ -225,6 +226,33 @@ class ClientDetailView(QWidget):
         self.statements_empty.setStyleSheet("color: #6B6679;")
         self.statements_empty.setVisible(False)
         outer.addWidget(self.statements_empty)
+
+        return group
+
+    def _build_exports_panel(self) -> QGroupBox:
+        """Group-box wrapping the reusable ExportsPanel widget."""
+        from .widgets.exports_panel import ExportsPanel
+
+        group = QGroupBox("Past exports")
+        outer = QVBoxLayout(group)
+        outer.setContentsMargins(12, 18, 12, 12)
+        outer.setSpacing(6)
+
+        hint = QLabel(
+            "Every export is filed here with a data-compliance PDF snapshot. "
+            "Double-click a file to open it."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #6B6679;")
+        outer.addWidget(hint)
+
+        try:
+            client = get_client(self.client_id)
+            folder = client.folder_path
+        except ClientError:
+            folder = ""
+        self.exports_panel = ExportsPanel(folder)
+        outer.addWidget(self.exports_panel)
 
         return group
 
@@ -1008,10 +1036,23 @@ class ClientDetailView(QWidget):
         auto_copy = self._auto_save_copy(out, export_kind)
         self._record_export_audit(out, auto_copy, export_kind)
 
+        # Always also produce a PDF for data-compliance archiving.  The PDF is
+        # written directly into {client_folder}/exports/ without prompting —
+        # the broker picks the primary (shareable) format, the PDF is the
+        # tamper-evident record.
+        pdf_copy = self._auto_save_pdf()
+        if pdf_copy is not None:
+            self._record_export_audit(pdf_copy, None, "pdf")
+
         message = f"Saved to:\n{out}"
         if auto_copy is not None:
             message += f"\n\nA copy was also filed under this client:\n{auto_copy}"
+        if pdf_copy is not None:
+            message += f"\n\nCompliance PDF:\n{pdf_copy}"
         QMessageBox.information(self, "Export complete", message)
+
+        if hasattr(self, "exports_panel"):
+            self.exports_panel.refresh()
 
     def _auto_save_copy(self, primary: Path, export_kind: str) -> Path | None:
         """Drop a dated duplicate into ``{client_folder}/exports/``.
@@ -1036,6 +1077,35 @@ class ClientDetailView(QWidget):
         try:
             shutil.copy2(primary, target)
         except OSError:
+            return None
+        return target
+
+    def _auto_save_pdf(self) -> Path | None:
+        """Render an always-on PDF snapshot into ``{client_folder}/exports/``.
+
+        Used for data-compliance: every export produces a PDF regardless of
+        the user's primary choice.  Returns the PDF path, or ``None`` on
+        failure (we don't want to block the primary export).
+        """
+        try:
+            client = get_client(self.client_id)
+        except ClientError:
+            return None
+        folder = Path(client.folder_path)
+        exports = folder / "exports"
+        try:
+            exports.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        stamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        target = exports / f"{stamp}-affordability.pdf"
+        try:
+            from ..export.pdf import export_client_pdf
+            export_client_pdf(
+                self.client_id, target,
+                declared_income=self._declared_income(),
+            )
+        except Exception:  # noqa: BLE001 — compliance copy is best-effort
             return None
         return target
 
