@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -36,9 +37,23 @@ from ..clients.service import (
     reassign_client,
     rename_client,
     restore_client,
+    soft_delete_client,
 )
 from ..users import service as users_service
-from .greetings import greeting_for, random_quote
+
+
+# Status codes used in the combo's userData and as sort keys.
+_STATUS_ACTIVE = "active"
+_STATUS_CLOSED = "closed"
+_STATUS_DELETED = "deleted"
+
+
+def _status_for(rec: ClientRecord) -> str:
+    if rec.deleted_at is not None:
+        return _STATUS_DELETED
+    if rec.archived_at is not None:
+        return _STATUS_CLOSED
+    return _STATUS_ACTIVE
 
 
 class NewClientDialog(QDialog):
@@ -125,6 +140,16 @@ class ReassignDialog(QDialog):
         return int(data) if data is not None else None
 
 
+# Column indexes — single source of truth.
+_COL_PROCESSING = 0
+_COL_NAME = 1
+_COL_REFERENCE = 2
+_COL_MANAGER = 3
+_COL_CREATED = 4
+_COL_STATUS = 5
+_COL_ID = 6
+
+
 class ClientsView(QWidget):
     open_client = Signal(int, str)   # (client_id, name)
     logout_requested = Signal()
@@ -140,24 +165,14 @@ class ClientsView(QWidget):
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
 
-        # Top row — greeting + motivational line + collapsed menu button.
+        # Top row — title + collapsed menu button.  (Motivational greeting has
+        # been removed per broker feedback — the list itself is the start of
+        # each session's work.)
         header = QHBoxLayout()
         header.setSpacing(10)
-
-        greeting_col = QVBoxLayout()
-        greeting_col.setSpacing(2)
-        self.greeting_label = QLabel("")
-        self.greeting_label.setStyleSheet(
-            "QLabel { font-size: 22px; font-weight: 600; color: #1F1030; }"
-        )
-        self.quote_label = QLabel("")
-        self.quote_label.setStyleSheet("QLabel { color: #6B6679; font-size: 13px; }")
-        self.quote_label.setWordWrap(True)
-        greeting_col.addWidget(self.greeting_label)
-        greeting_col.addWidget(self.quote_label)
-        header.addLayout(greeting_col, 1)
-
-        header.addStretch(0)
+        title = QLabel("<h1 style='margin:0'>Clients</h1>")
+        header.addWidget(title)
+        header.addStretch(1)
 
         self.menu_btn = QToolButton()
         self.menu_btn.setText("☰  Menu")
@@ -194,19 +209,40 @@ class ClientsView(QWidget):
         self.search.setPlaceholderText("Filter by name or reference…")
         self.search.textChanged.connect(self._apply_filter)
         toolbar.addWidget(self.search, 1)
-        self.show_archived = QCheckBox("Show archived")
-        self.show_archived.stateChanged.connect(self.refresh)
-        toolbar.addWidget(self.show_archived)
+        self.show_closed = QCheckBox("Show closed")
+        self.show_closed.setToolTip("Include clients that have been marked Closed.")
+        self.show_closed.stateChanged.connect(self.refresh)
+        toolbar.addWidget(self.show_closed)
+        # Admin-only — see soft-deleted clients.
+        self.show_deleted = QCheckBox("Show deleted")
+        self.show_deleted.setToolTip("Administrators only — include soft-deleted clients.")
+        self.show_deleted.setVisible(False)
+        self.show_deleted.stateChanged.connect(self.refresh)
+        toolbar.addWidget(self.show_deleted)
         layout.addLayout(toolbar)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["Name", "Reference", "Created", "Status", "ID"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(
+            ["", "Name", "Reference", "Client manager", "Created", "Status", "ID"]
+        )
+        header_view = self.table.horizontalHeader()
+        header_view.setSectionsClickable(True)
+        header_view.setSectionsMovable(True)  # reorderable columns (drag header)
+        header_view.setSortIndicatorShown(True)
+        header_view.setSectionResizeMode(_COL_PROCESSING, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(_COL_PROCESSING, 120)
+        header_view.setSectionResizeMode(_COL_NAME, QHeaderView.ResizeMode.Stretch)
+        header_view.setSectionResizeMode(_COL_REFERENCE, QHeaderView.ResizeMode.Interactive)
+        header_view.setSectionResizeMode(_COL_MANAGER, QHeaderView.ResizeMode.Interactive)
+        header_view.setSectionResizeMode(_COL_CREATED, QHeaderView.ResizeMode.ResizeToContents)
+        header_view.setSectionResizeMode(_COL_STATUS, QHeaderView.ResizeMode.ResizeToContents)
+        header_view.setSectionResizeMode(_COL_ID, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setAlternatingRowColors(True)
+        self.table.setSortingEnabled(True)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
         self.table.cellDoubleClicked.connect(self._open_selected)
@@ -227,6 +263,20 @@ class ClientsView(QWidget):
         layout.addLayout(bottom)
 
         self._records: list[ClientRecord] = []
+        self._processing_ids: set[int] = set()
+
+    # ---- public API -----------------------------------------------------
+
+    def set_processing_clients(self, ids: set[int]) -> None:
+        """Called by the main window when workers start/stop.
+
+        Updates the progress-bar column in place (no full refresh, so sort
+        order and selection are preserved).
+        """
+        self._processing_ids = set(ids)
+        self._repaint_processing_column()
+
+    # ---- rendering ------------------------------------------------------
 
     def refresh(self) -> None:
         cu = get_current()
@@ -235,18 +285,19 @@ class ClientsView(QWidget):
             self.user_label.setText(
                 f"<span style='color:#555'>Signed in as <b>{label}</b> ({cu.role})</span>"
             )
-            first = (label.split()[0] if label else label) or "there"
-            self.greeting_label.setText(greeting_for(first))
-            self.quote_label.setText(random_quote())
             is_admin = cu.role == "admin"
             self.admin_action.setVisible(is_admin)
             self.audit_action.setVisible(is_admin)
+            self.show_deleted.setVisible(is_admin)
+            if not is_admin:
+                self.show_deleted.setChecked(False)
         else:
-            self.greeting_label.setText("Welcome")
-            self.quote_label.setText("")
             self.user_label.setText("")
         try:
-            self._records = list_clients(include_archived=self.show_archived.isChecked())
+            self._records = list_clients(
+                include_archived=self.show_closed.isChecked(),
+                include_deleted=self.show_deleted.isChecked(),
+            )
         except Exception as e:  # noqa: BLE001
             self._records = []
             self.status_label.setText(f"Could not load clients: {e}")
@@ -260,17 +311,16 @@ class ClientsView(QWidget):
                 r for r in rows
                 if needle in r.display_name.lower()
                 or (r.reference or "").lower().find(needle) >= 0
+                or (r.created_by_name or "").lower().find(needle) >= 0
             ]
+        # Rebuilding the table removes cell widgets; disable sorting while we
+        # populate so row indexes stay stable, then re-enable.
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
         for idx, c in enumerate(rows):
-            self.table.setItem(idx, 0, QTableWidgetItem(c.display_name))
-            self.table.setItem(idx, 1, QTableWidgetItem(c.reference or ""))
-            self.table.setItem(idx, 2, QTableWidgetItem(c.created_at.strftime("%Y-%m-%d")))
-            status = "archived" if c.archived_at else "active"
-            self.table.setItem(idx, 3, QTableWidgetItem(status))
-            id_item = QTableWidgetItem(str(c.id))
-            id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(idx, 4, id_item)
+            self._populate_row(idx, c)
+        self.table.setSortingEnabled(True)
+        self._repaint_processing_column()
         hint = "Double-click to open, or right-click for more actions."
         self.status_label.setText(
             f"{len(rows)} of {len(self._records)} client(s) shown"
@@ -278,18 +328,155 @@ class ClientsView(QWidget):
             + f"  ·  {hint}"
         )
 
+    def _populate_row(self, row: int, c: ClientRecord) -> None:
+        # Processing column (widget added/removed by _repaint_processing_column).
+        # A placeholder item lets sorting work without crashing when empty.
+        proc_item = QTableWidgetItem("")
+        proc_item.setFlags(proc_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        self.table.setItem(row, _COL_PROCESSING, proc_item)
+
+        name_item = QTableWidgetItem(c.display_name)
+        self.table.setItem(row, _COL_NAME, name_item)
+
+        ref_item = QTableWidgetItem(c.reference or "")
+        self.table.setItem(row, _COL_REFERENCE, ref_item)
+
+        manager_item = QTableWidgetItem(c.created_by_name or "")
+        self.table.setItem(row, _COL_MANAGER, manager_item)
+
+        created_item = QTableWidgetItem(c.created_at.strftime("%Y-%m-%d"))
+        # ISO-format dates already sort lexicographically; no extra role needed.
+        self.table.setItem(row, _COL_CREATED, created_item)
+
+        # Status cell hosts a live combo box so archiving is one click.
+        status_code = _status_for(c)
+        # The underlying item holds the status text so the column still sorts
+        # correctly even though a combo widget covers it.
+        status_item = QTableWidgetItem(status_code)
+        self.table.setItem(row, _COL_STATUS, status_item)
+        combo = self._make_status_combo(c, status_code)
+        self.table.setCellWidget(row, _COL_STATUS, combo)
+
+        id_item = QTableWidgetItem()
+        id_item.setData(Qt.ItemDataRole.DisplayRole, c.id)  # numeric sort
+        id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.table.setItem(row, _COL_ID, id_item)
+
+    def _make_status_combo(self, rec: ClientRecord, status: str) -> QComboBox:
+        cu = get_current()
+        is_admin = cu is not None and cu.role == "admin"
+        combo = QComboBox()
+        combo.addItem("Active", userData=_STATUS_ACTIVE)
+        combo.addItem("Closed", userData=_STATUS_CLOSED)
+        if is_admin or status == _STATUS_DELETED:
+            combo.addItem("Deleted", userData=_STATUS_DELETED)
+        target_idx = combo.findData(status)
+        if target_idx < 0:
+            # Non-admin viewing a deleted row (shouldn't happen, but be safe).
+            combo.addItem("Deleted", userData=_STATUS_DELETED)
+            target_idx = combo.findData(status)
+        combo.setCurrentIndex(max(0, target_idx))
+        # Anchor on client_id because row indexes shift when the user re-sorts.
+        cid = rec.id
+        combo.currentIndexChanged.connect(
+            lambda new_idx, client_id=cid, box=combo: self._on_status_changed(client_id, box)
+        )
+        return combo
+
+    def _repaint_processing_column(self) -> None:
+        for row in range(self.table.rowCount()):
+            cid = self._client_id_for_row(row)
+            if cid is not None and cid in self._processing_ids:
+                existing = self.table.cellWidget(row, _COL_PROCESSING)
+                if not isinstance(existing, QProgressBar):
+                    bar = QProgressBar()
+                    bar.setRange(0, 0)           # indeterminate
+                    bar.setTextVisible(False)
+                    bar.setFixedHeight(10)
+                    bar.setToolTip("Processing in the background…")
+                    self.table.setCellWidget(row, _COL_PROCESSING, bar)
+            else:
+                if self.table.cellWidget(row, _COL_PROCESSING) is not None:
+                    self.table.removeCellWidget(row, _COL_PROCESSING)
+
+    # ---- row helpers ---------------------------------------------------
+
+    def _client_id_for_row(self, row: int) -> int | None:
+        item = self.table.item(row, _COL_ID)
+        if item is None:
+            return None
+        data = item.data(Qt.ItemDataRole.DisplayRole)
+        try:
+            return int(data)
+        except (TypeError, ValueError):
+            return None
+
+    def _record_for_id(self, client_id: int) -> ClientRecord | None:
+        for r in self._records:
+            if r.id == client_id:
+                return r
+        return None
+
     def _selected_record(self) -> ClientRecord | None:
         row = self.table.currentRow()
         if row < 0:
             return None
-        try:
-            cid = int(self.table.item(row, 4).text())
-        except (AttributeError, ValueError):
+        cid = self._client_id_for_row(row)
+        if cid is None:
             return None
-        for r in self._records:
-            if r.id == cid:
-                return r
-        return None
+        return self._record_for_id(cid)
+
+    # ---- status combo slot ---------------------------------------------
+
+    def _on_status_changed(self, client_id: int, combo: QComboBox) -> None:
+        rec = self._record_for_id(client_id)
+        if rec is None:
+            return
+        current_status = _status_for(rec)
+        target = combo.currentData()
+        if target == current_status:
+            return
+        cu = get_current()
+        is_admin = cu is not None and cu.role == "admin"
+
+        if target == _STATUS_DELETED and not is_admin:
+            QMessageBox.warning(
+                self, "Administrators only",
+                "Only an administrator can mark a client as Deleted.",
+            )
+            self.refresh()
+            return
+
+        try:
+            if target == _STATUS_ACTIVE:
+                # Lift whichever marker is set (Closed or Deleted).
+                restore_client(client_id)
+            elif target == _STATUS_CLOSED:
+                # If coming back from Deleted we first need restore, then archive.
+                if current_status == _STATUS_DELETED:
+                    restore_client(client_id)
+                if QMessageBox.question(
+                    self, "Close client",
+                    f"Mark '{rec.display_name}' as Closed?  It will be hidden "
+                    "until you toggle 'Show closed'.",
+                ) != QMessageBox.StandardButton.Yes:
+                    self.refresh()
+                    return
+                archive_client(client_id)
+            elif target == _STATUS_DELETED:
+                if QMessageBox.question(
+                    self, "Delete client (soft)",
+                    f"Mark '{rec.display_name}' as Deleted?  Only administrators "
+                    "will be able to see it, and they can restore it later.",
+                ) != QMessageBox.StandardButton.Yes:
+                    self.refresh()
+                    return
+                soft_delete_client(client_id)
+        except (ClientError, PermissionError) as e:
+            QMessageBox.warning(self, "Status change failed", str(e))
+        self.refresh()
+
+    # ---- context menu --------------------------------------------------
 
     def _context_menu(self, pos) -> None:
         row = self.table.indexAt(pos).row()
@@ -311,12 +498,12 @@ class ClientsView(QWidget):
         rename_act.triggered.connect(self._rename_selected)
         menu.addAction(rename_act)
 
-        if rec.archived_at is None:
-            arch_act = QAction("Archive", self)
+        if rec.archived_at is None and rec.deleted_at is None:
+            arch_act = QAction("Close", self)
             arch_act.triggered.connect(self._archive_selected)
             menu.addAction(arch_act)
         else:
-            restore_act = QAction("Restore", self)
+            restore_act = QAction("Restore to Active", self)
             restore_act.triggered.connect(self._restore_selected)
             menu.addAction(restore_act)
 
@@ -326,10 +513,10 @@ class ClientsView(QWidget):
         reassign_act.setEnabled(is_admin)
         menu.addAction(reassign_act)
 
-        delete_act = QAction("Delete…", self)
-        delete_act.triggered.connect(self._delete_selected)
-        delete_act.setEnabled(is_admin)
-        menu.addAction(delete_act)
+        purge_act = QAction("Permanently delete…  (irreversible)", self)
+        purge_act.triggered.connect(self._delete_selected)
+        purge_act.setEnabled(is_admin)
+        menu.addAction(purge_act)
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
@@ -354,14 +541,15 @@ class ClientsView(QWidget):
         if rec is None:
             return
         if QMessageBox.question(
-            self, "Archive client",
-            f"Archive '{rec.display_name}'? It will be hidden until you toggle 'Show archived'.",
+            self, "Close client",
+            f"Mark '{rec.display_name}' as Closed?  It will be hidden until you "
+            "toggle 'Show closed'.",
         ) != QMessageBox.StandardButton.Yes:
             return
         try:
             archive_client(rec.id)
         except ClientError as e:
-            QMessageBox.warning(self, "Archive failed", str(e))
+            QMessageBox.warning(self, "Close failed", str(e))
             return
         self.refresh()
 
@@ -371,7 +559,7 @@ class ClientsView(QWidget):
             return
         try:
             restore_client(rec.id)
-        except ClientError as e:
+        except (ClientError, PermissionError) as e:
             QMessageBox.warning(self, "Restore failed", str(e))
             return
         self.refresh()
@@ -380,7 +568,7 @@ class ClientsView(QWidget):
         rec = self._selected_record()
         if rec is None:
             return
-        dlg = ReassignDialog(current_owner_id=None, parent=self)
+        dlg = ReassignDialog(current_owner_id=rec.created_by, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         target = dlg.selected_user_id()
@@ -397,14 +585,24 @@ class ClientsView(QWidget):
         rec = self._selected_record()
         if rec is None:
             return
-        typed, ok = QInputDialog.getText(
-            self, "Delete client",
-            f"Type the client name '{rec.display_name}' to confirm deletion. "
-            "All statements and transactions will be removed.",
+        cu = get_current()
+        if cu is None or cu.role != "admin":
+            QMessageBox.warning(
+                self, "Administrators only",
+                "Only administrators can permanently delete clients.",
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "Permanently delete client?",
+            f"Permanently delete '{rec.display_name}'?\n\n"
+            "All statements and transactions for this client will be removed. "
+            "This cannot be undone.\n\n"
+            "(Use the Status column's 'Deleted' option for a recoverable soft-delete.)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        if not ok or typed.strip() != rec.display_name:
-            if ok:
-                QMessageBox.information(self, "Not deleted", "Name did not match — nothing deleted.")
+        if reply != QMessageBox.StandardButton.Yes:
             return
         try:
             delete_client(rec.id)

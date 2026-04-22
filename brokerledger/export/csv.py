@@ -7,10 +7,11 @@ from pathlib import Path
 from sqlalchemy import select
 
 from ..db.engine import session_scope
-from ..db.models import Transaction
+from ..db.models import Client, Transaction
 
 
 COLUMNS = [
+    "Client",
     "Date", "Description", "Merchant", "Amount (GBP)", "Direction",
     "Category", "Group", "Certainty", "Method", "Flags", "Flagged",
 ]
@@ -32,12 +33,15 @@ def export_transactions_csv(
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with session_scope() as s:
+        client = s.get(Client, client_id)
+        client_name = client.display_name if client else ""
         rows = s.execute(
             select(Transaction).where(Transaction.client_id == client_id)
             .order_by(Transaction.posted_date.asc(), Transaction.id.asc())
         ).scalars().all()
         payload = [
             [
+                client_name,
                 r.posted_date,
                 r.description_raw,
                 r.merchant_normalized,

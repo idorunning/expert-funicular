@@ -824,7 +824,7 @@ class ClientDetailView(QWidget):
         self.notice.setStyleSheet(
             f"QLabel {{ background-color: {bg}; color: {fg}; "
             f"border: 1px solid {border}; border-radius: 8px; "
-            "padding: 10px 12px; font-size: 14px; }}"
+            "padding: 10px 12px; font-size: 14px; }"
         )
         self.notice.setText(html_or_text)
         self.notice.setVisible(True)

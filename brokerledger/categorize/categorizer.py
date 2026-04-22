@@ -41,6 +41,25 @@ class Decision:
     thinking: str = ""
 
 
+def _finalise_for_flags(d: Decision, *, risk_flags: list[str]) -> Decision:
+    """Force ``needs_review`` + annotate the reason when a risk flag is present.
+
+    The flag-based smart-default branch already sets ``needs_review=True``
+    but other branches (register hits, LLM) don't know the row was flagged.
+    This keeps flagged transactions visible in Review without dictating
+    their category — the category comes from whatever branch classified it.
+    """
+    if not risk_flags:
+        return d
+    d.needs_review = True
+    if d.source == "flag_default":
+        return d
+    suffix = f" [flagged: {', '.join(risk_flags)}]"
+    if suffix not in (d.reason or ""):
+        d.reason = (d.reason or "") + suffix
+    return d
+
+
 def _escalate_if_risk(d: Decision) -> Decision:
     """High-risk categories always land in Review; cap confidence below High tier."""
     if d.category not in RISK_CATEGORIES:
@@ -72,66 +91,71 @@ def _decide(
     settings = get_settings()
     is_credit = direction == "credit"
     flags_list = detect_flags(description_raw, merchant, direction=direction)
-
-    # 0. Flag-based smart default — gambling and fast payments get a
-    # pre-filled category suggestion and always land in Review. The normal
-    # pipeline is skipped for these risk flags.
-    # FLAG_INBOUND is purely cosmetic — it marks the chip in Review but does
-    # NOT shortcut the pipeline; credits still get a proper category.
     risk_flags = [f for f in flags_list if f != "inbound"]
+
+    # 0. Flag-based smart default — only short-circuit when the flag has a
+    # concrete category on this direction (Gambling debit → Entertainment,
+    # FP credit → Other income). A Fast Payment DEBIT has no default
+    # category because "Liam Tracey (Pocket money) FASTER PAYMENT" is still
+    # obviously Child care from the description; letting the pipeline run
+    # means the register and LLM get to classify it, while the flag chip
+    # still prompts the broker to confirm the recipient. The flag forces
+    # ``needs_review=True`` at the end regardless of where the pipeline
+    # lands.
     if risk_flags:
         smart = smart_default_category(risk_flags, is_credit=is_credit)
-        category = smart or ""
-        group = group_of(category) if category else GROUP_DISCRETIONARY
-        flag_names = ", ".join(risk_flags)
-        return Decision(
-            category=category,
-            group=group,
-            confidence=0.85 if smart else 0.50,
-            source="flag_default",
-            reason=f"flagged: {flag_names}; smart default applied" if smart else f"flagged: {flag_names}; needs manual category",
-            needs_review=True,
-        )
+        if smart:
+            return _finalise_for_flags(
+                Decision(
+                    category=smart,
+                    group=group_of(smart),
+                    confidence=0.85,
+                    source="flag_default",
+                    reason=f"flagged: {', '.join(risk_flags)}; smart default applied",
+                    needs_review=True,
+                ),
+                risk_flags=risk_flags,
+            )
 
     # 1. Exact rule.
     exact = find_exact(session, merchant, client_id)
     if exact is not None and exact.weight >= get_threshold("confirm_weight_threshold"):
         touch_rule_last_seen(session, merchant, exact.category)
-        return _escalate_if_risk(Decision(
+        return _finalise_for_flags(_escalate_if_risk(Decision(
             category=exact.category,
             group=group_of(exact.category),
             confidence=0.99,
             source="rule",
             reason=f"exact match (scope={exact.scope}, weight={exact.weight})",
             needs_review=False,
-        ))
+        )), risk_flags=risk_flags)
 
     # 2. Fuzzy rule.
     fuzzy = fuzzy_topk(session, merchant, k=5)
     top = fuzzy[0] if fuzzy else None
     if top is not None and top.score >= get_threshold("fuzzy_high"):
         touch_rule_last_seen(session, merchant, top.category)
-        return _escalate_if_risk(Decision(
+        return _finalise_for_flags(_escalate_if_risk(Decision(
             category=top.category,
             group=group_of(top.category),
             confidence=0.9,
             source="rule",
             reason=f"fuzzy match score={top.score:.0f}",
             needs_review=False,
-        ))
+        )), risk_flags=risk_flags)
     # 2b. Fuzzy-medium — register match but below the auto-apply bar. Use
     #     the register's answer as a strong hint but keep the row in Review
     #     so the broker can confirm or override.
     if top is not None and top.score >= get_threshold("fuzzy_medium"):
         touch_rule_last_seen(session, merchant, top.category)
-        return _escalate_if_risk(Decision(
+        return _finalise_for_flags(_escalate_if_risk(Decision(
             category=top.category,
             group=group_of(top.category),
             confidence=0.75,
             source="register_fuzzy",
             reason=f"fuzzy match (medium) score={top.score:.0f}",
             needs_review=True,
-        ))
+        )), risk_flags=risk_flags)
 
     # 3. LLM with few-shot.
     few_shot = retrieve_few_shot(session, merchant=merchant, client_id=client_id, k=settings.few_shot_k)
@@ -164,14 +188,14 @@ def _decide(
             posted_date=posted_date,
             few_shot=few_shot,
         )
-        return _escalate_if_risk(Decision(
+        return _finalise_for_flags(_escalate_if_risk(Decision(
             category=kw.category,
             group=kw.group,
             confidence=min(kw.confidence, 0.35),
             source="llm",
             reason=f"keyword fallback (AI unavailable: {last_err})",
             needs_review=True,
-        ))
+        )), risk_flags=risk_flags)
 
     # 3b. Conditional web-lookup fallback — only when the first pass gave up
     # (low confidence OR landed on a generic bucket) AND the admin has
@@ -230,7 +254,7 @@ def _decide(
         needs_review = True
 
     source = "rule+llm" if top is not None else "llm"
-    return _escalate_if_risk(Decision(
+    return _finalise_for_flags(_escalate_if_risk(Decision(
         category=out.category,
         group=out.group,
         confidence=out.confidence,
@@ -238,7 +262,7 @@ def _decide(
         reason=out.reason + web_reason_suffix,
         needs_review=needs_review,
         thinking=thinking_combined,
-    ))
+    )), risk_flags=risk_flags)
 
 
 def categorize_statement(

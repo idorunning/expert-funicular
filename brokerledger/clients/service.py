@@ -11,9 +11,17 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from .. import paths
-from ..auth.session import require_admin, require_login
+from ..auth.session import CurrentUser, require_admin, require_login
 from ..db.engine import session_scope
-from ..db.models import AuditLog, Client, Statement, Transaction, User, utcnow
+from ..db.models import (
+    AdminBrokerAssignment,
+    AuditLog,
+    Client,
+    Statement,
+    Transaction,
+    User,
+    utcnow,
+)
 
 
 @dataclass(frozen=True)
@@ -32,6 +40,11 @@ class ClientRecord:
     folder_path: str
     created_at: datetime
     archived_at: datetime | None
+    deleted_at: datetime | None = None
+    created_by: int | None = None
+    # Human-readable broker name ("Jane Smith" or "jsmith"). Populated by
+    # ``list_clients`` / ``get_client`` via a cheap one-shot join.
+    created_by_name: str | None = None
 
 
 class ClientError(Exception):
@@ -53,6 +66,52 @@ def _allocate_folder(display_name: str, client_id: int) -> Path:
     (folder / "statements").mkdir(parents=True, exist_ok=True)
     (folder / "exports").mkdir(parents=True, exist_ok=True)
     return folder
+
+
+def _owner_name_map(session, user_ids: set[int]) -> dict[int, str]:
+    """Return {user_id: full_name or username} for the given ids."""
+    if not user_ids:
+        return {}
+    rows = session.execute(
+        select(User.id, User.full_name, User.username).where(User.id.in_(user_ids))
+    ).all()
+    return {
+        uid: (full or username or "")
+        for (uid, full, username) in rows
+    }
+
+
+def _record(c: Client, owner_name: str | None = None) -> ClientRecord:
+    return ClientRecord(
+        id=c.id,
+        display_name=c.display_name,
+        reference=c.reference,
+        folder_path=c.folder_path,
+        created_at=c.created_at,
+        archived_at=c.archived_at,
+        deleted_at=c.deleted_at,
+        created_by=c.created_by,
+        created_by_name=owner_name,
+    )
+
+
+def _visible_broker_ids(user: CurrentUser, session) -> set[int] | None:
+    """Broker ids whose clients are visible to ``user``.
+
+    Returns ``None`` to mean "no scope filter" (administrators see everything).
+    """
+    if user.role == "admin":
+        return None
+    if user.role == "broker":
+        return {user.id}
+    if user.role == "admin_staff":
+        rows = session.execute(
+            select(AdminBrokerAssignment.broker_user_id).where(
+                AdminBrokerAssignment.admin_user_id == user.id
+            )
+        ).all()
+        return {r[0] for r in rows}
+    return set()
 
 
 def create_client(display_name: str, reference: str | None = None) -> ClientRecord:
@@ -80,20 +139,44 @@ def create_client(display_name: str, reference: str | None = None) -> ClientReco
         s.add(AuditLog(user_id=user.id, action="create_client", entity_type="client", entity_id=c.id,
                        detail_json=json.dumps({"display_name": display_name})))
         s.commit()
-        return ClientRecord(c.id, c.display_name, c.reference, c.folder_path, c.created_at, c.archived_at)
+        return _record(c, owner_name=user.full_name or user.username)
 
 
-def list_clients(include_archived: bool = False) -> list[ClientRecord]:
-    require_login()
+def list_clients(
+    include_archived: bool = False,
+    include_deleted: bool = False,
+) -> list[ClientRecord]:
+    """List clients visible to the current user.
+
+    * Administrator (``role='admin'``) sees every client.
+    * Broker sees only clients they created.
+    * Admin staff sees clients of every broker they're assigned to.
+
+    ``include_archived`` — show clients with ``archived_at`` set (the renamed
+    "Closed" status).  ``include_deleted`` — only honoured for administrators;
+    shows clients with ``deleted_at`` set.
+    """
+    user = require_login()
     with session_scope() as s:
         q = select(Client).order_by(Client.display_name.asc())
+
+        scope = _visible_broker_ids(user, s)
+        if scope is not None:
+            if not scope:
+                return []
+            q = q.where(Client.created_by.in_(scope))
+
         if not include_archived:
             q = q.where(Client.archived_at.is_(None))
-        rows = s.execute(q).scalars().all()
-        return [
-            ClientRecord(c.id, c.display_name, c.reference, c.folder_path, c.created_at, c.archived_at)
-            for c in rows
-        ]
+
+        # Only admins can see soft-deleted clients, and even then only when
+        # they explicitly ask.
+        if not (include_deleted and user.role == "admin"):
+            q = q.where(Client.deleted_at.is_(None))
+
+        rows = list(s.execute(q).scalars().all())
+        owner_names = _owner_name_map(s, {c.created_by for c in rows if c.created_by})
+        return [_record(c, owner_name=owner_names.get(c.created_by)) for c in rows]
 
 
 def get_client(client_id: int) -> ClientRecord:
@@ -102,7 +185,8 @@ def get_client(client_id: int) -> ClientRecord:
         c = s.get(Client, client_id)
         if c is None:
             raise ClientError("Client not found")
-        return ClientRecord(c.id, c.display_name, c.reference, c.folder_path, c.created_at, c.archived_at)
+        names = _owner_name_map(s, {c.created_by} if c.created_by else set())
+        return _record(c, owner_name=names.get(c.created_by) if c.created_by else None)
 
 
 def rename_client(client_id: int, new_name: str) -> ClientRecord:
@@ -118,10 +202,11 @@ def rename_client(client_id: int, new_name: str) -> ClientRecord:
         s.add(AuditLog(user_id=user.id, action="rename_client", entity_type="client", entity_id=c.id,
                        detail_json=json.dumps({"display_name": new_name})))
         s.commit()
-        return ClientRecord(c.id, c.display_name, c.reference, c.folder_path, c.created_at, c.archived_at)
+        return _record(c)
 
 
 def archive_client(client_id: int) -> None:
+    """Mark the client as Closed (soft-hidden but recoverable)."""
     user = require_login()
     with session_scope() as s:
         c = s.get(Client, client_id)
@@ -133,15 +218,37 @@ def archive_client(client_id: int) -> None:
 
 
 def restore_client(client_id: int) -> ClientRecord:
+    """Clear Closed/Deleted markers and make the client Active again."""
     user = require_login()
     with session_scope() as s:
         c = s.get(Client, client_id)
         if c is None:
             raise ClientError("Client not found")
+        # If the client was soft-deleted, only administrators may restore.
+        if c.deleted_at is not None and user.role != "admin":
+            raise ClientError("Only an administrator can restore a deleted client.")
         c.archived_at = None
+        c.deleted_at = None
         s.add(AuditLog(user_id=user.id, action="restore_client", entity_type="client", entity_id=c.id))
         s.commit()
-        return ClientRecord(c.id, c.display_name, c.reference, c.folder_path, c.created_at, c.archived_at)
+        return _record(c)
+
+
+def soft_delete_client(client_id: int) -> None:
+    """Administrator-only soft delete — marks ``deleted_at`` so the client is
+    hidden from every user but can be recovered via ``restore_client``.
+
+    Distinct from :func:`delete_client`, which performs a hard delete
+    (cascading to statements and transactions).
+    """
+    user = require_admin()
+    with session_scope() as s:
+        c = s.get(Client, client_id)
+        if c is None:
+            raise ClientError("Client not found")
+        c.deleted_at = utcnow()
+        s.add(AuditLog(user_id=user.id, action="soft_delete_client", entity_type="client", entity_id=c.id))
+        s.commit()
 
 
 def delete_client(client_id: int) -> None:
@@ -243,4 +350,4 @@ def reassign_client(client_id: int, new_user_id: int) -> ClientRecord:
             detail_json=json.dumps({"from": from_id, "to": new_user_id}),
         ))
         s.commit()
-        return ClientRecord(c.id, c.display_name, c.reference, c.folder_path, c.created_at, c.archived_at)
+        return _record(c)

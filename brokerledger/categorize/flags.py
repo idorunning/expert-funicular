@@ -8,6 +8,7 @@ from __future__ import annotations
 
 FLAG_GAMBLING = "gambling"
 FLAG_FAST_PAYMENT = "fast_payment"
+FLAG_INSURANCE_DD = "insurance_dd"   # recurring insurance direct debit
 FLAG_INBOUND = "inbound"   # any credit / money-in transaction
 
 # Keyword hits that mark a description as gambling. Lower-case substrings.
@@ -37,11 +38,51 @@ _FAST_PAYMENT_KEYWORDS: tuple[str, ...] = (
     "chaps ",
 )
 
+# Keyword hits that mark a direct debit as an insurance premium.  UK brokers
+# want these called out as a separate risk flag because they are recurring
+# monthly commitments that affect affordability (same bucket as gambling and
+# fast-payment risk from the underwriter's point of view).
+_INSURANCE_KEYWORDS: tuple[str, ...] = (
+    "insurance",
+    "insure",
+    " assurance",    # "life assurance" — leading space avoids matching "reassurance"
+    "aviva",
+    "direct line",
+    "churchill",
+    "admiral",
+    "more than",
+    "hastings",
+    "lv=",
+    "lv =",
+    "legal & general",
+    "legal and general",
+    "nfu mutual",
+    "saga ",
+    "esure",
+    "sheilas wheels",
+    "swiftcover",
+    "petplan",
+    "pet plan",
+    "axa ",
+    "allianz",
+    "zurich",
+    "royal london",
+    "prudential",
+    "scottish widows",
+    "vitality",
+)
+_INSURANCE_DD_TOKENS: tuple[str, ...] = (
+    "direct debit",
+    "dd ",
+    " dd",
+)
+
 
 # (category_if_debit, category_if_credit)
 SMART_DEFAULTS: dict[str, tuple[str | None, str | None]] = {
     FLAG_GAMBLING:      ("Entertainment", None),
     FLAG_FAST_PAYMENT:  (None, "Other income"),
+    FLAG_INSURANCE_DD:  ("Insurance", None),
 }
 
 
@@ -74,6 +115,29 @@ def detect_flags(
             if kw in blob:
                 result.append(FLAG_FAST_PAYMENT)
                 break
+
+    # Insurance direct debits. Match either an explicit insurance-brand name
+    # OR the combination of a DD marker with a generic insurance token.  We
+    # skip crediting this flag to credits (no such thing as a premium being
+    # paid into the account).
+    if direction == "debit":
+        is_insurance = False
+        for kw in _INSURANCE_KEYWORDS:
+            if kw in blob:
+                is_insurance = True
+                break
+        if is_insurance:
+            # Only mark as a DD when we can see a DD marker or the phrase
+            # "direct debit" is present — otherwise it's ambiguous (could be a
+            # one-off card payment that we don't want to flag).
+            for tok in _INSURANCE_DD_TOKENS:
+                if tok in blob:
+                    result.append(FLAG_INSURANCE_DD)
+                    break
+            else:
+                # Brand-name insurers on a debit almost always arrive as a DD
+                # even when the statement line doesn't say so; flag them anyway.
+                result.append(FLAG_INSURANCE_DD)
 
     # All credits get the inbound marker so brokers can spot and disregard
     # personal bank-to-bank transfers in one bulk action.
@@ -110,6 +174,7 @@ def smart_default_category(flags: list[str], is_credit: bool) -> str | None:
 FLAG_DISPLAY_NAMES: dict[str, str] = {
     FLAG_GAMBLING:     "Gambling",
     FLAG_FAST_PAYMENT: "Fast payment",
+    FLAG_INSURANCE_DD: "Insurance DD",
     FLAG_INBOUND:      "Inbound",
 }
 

@@ -794,9 +794,10 @@ class ReviewView(QWidget):
         from .widgets.category_grid_picker import CategoryGridPicker
 
         picker = CategoryGridPicker(current=None)
-        # Position the picker underneath the button that was clicked.
+        # Position the picker underneath the button that was clicked, clamped
+        # to the screen so it doesn't spill off the right/bottom edge.
         btn = self.apply_category_btn
-        picker.move(btn.mapToGlobal(btn.rect().bottomLeft()))
+        preferred = btn.mapToGlobal(btn.rect().bottomLeft())
 
         def _commit(category: str) -> None:
             updated = self.model.bulk_apply_category(row_nums, category)
@@ -804,9 +805,7 @@ class ReviewView(QWidget):
                 self.refresh_summary()
 
         picker.category_selected.connect(_commit)
-        picker.show()
-        picker.raise_()
-        picker.activateWindow()
+        picker.show_at(preferred)
         # Keep a reference so the popup isn't garbage-collected before the user clicks.
         self._bulk_picker = picker
 
