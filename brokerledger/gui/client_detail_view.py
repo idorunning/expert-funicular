@@ -49,8 +49,7 @@ from ..categorize.taxonomy import (
     INCOME_CATEGORIES,
     group_of,
 )
-from ..export.csv import export_transactions_csv
-from ..export.xlsx import export_client_workbook
+
 from .theme import BRAND_MAGENTA, BRAND_PURPLE_SOFT, SUCCESS
 from .widgets.dropzone import DropZone
 from .workers.ingest_worker import run_ingest_in_thread
@@ -988,69 +987,31 @@ class ClientDetailView(QWidget):
         self.processing_changed.emit(self.is_processing())
 
     def _export(self) -> None:
-        xlsx_filter = "Excel workbook (*.xlsx)"
-        csv_filter = "Google Sheets / CSV (*.csv)"
-        tsv_filter = "Plain text / tab-separated (*.txt *.tsv)"
-        filters = ";;".join([xlsx_filter, csv_filter, tsv_filter])
-        default_name = f"{self.client_name.replace(' ', '_')}_affordability.xlsx"
-        path, chosen = QFileDialog.getSaveFileName(
-            self, "Export transactions", default_name, filters
+        default_name = f"{self.client_name.replace(' ', '_')}_affordability.pdf"
+        pdf_filter = "PDF affordability report (*.pdf)"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export affordability report", default_name, pdf_filter
         )
         if not path:
             return
-        suffix = Path(path).suffix.lower()
-        export_kind = "xlsx"
-        if chosen == csv_filter or suffix == ".csv":
-            out_path = Path(path)
-            if out_path.suffix.lower() != ".csv":
-                out_path = out_path.with_suffix(".csv")
-            try:
-                out = export_transactions_csv(self.client_id, out_path, delimiter=",")
-            except Exception as e:  # noqa: BLE001
-                QMessageBox.critical(self, "Export failed", str(e))
-                return
-            export_kind = "csv"
-        elif chosen == tsv_filter or suffix in {".tsv", ".txt"}:
-            out_path = Path(path)
-            if out_path.suffix.lower() not in {".tsv", ".txt"}:
-                out_path = out_path.with_suffix(".txt")
-            try:
-                out = export_transactions_csv(self.client_id, out_path, delimiter="\t")
-            except Exception as e:  # noqa: BLE001
-                QMessageBox.critical(self, "Export failed", str(e))
-                return
-            export_kind = "tsv"
-        else:
-            out_path = Path(path)
-            if out_path.suffix.lower() != ".xlsx":
-                out_path = out_path.with_suffix(".xlsx")
-            try:
-                out = export_client_workbook(
-                    self.client_id, out_path, declared_income=self._declared_income()
-                )
-            except Exception as e:  # noqa: BLE001
-                QMessageBox.critical(self, "Export failed", str(e))
-                return
-            export_kind = "xlsx"
-
-        auto_copy = self._auto_save_copy(out, export_kind)
-        self._record_export_audit(out, auto_copy, export_kind)
-
-        # Always also produce a PDF for data-compliance archiving.  The PDF is
-        # written directly into {client_folder}/exports/ without prompting —
-        # the broker picks the primary (shareable) format, the PDF is the
-        # tamper-evident record.
-        pdf_copy = self._auto_save_pdf()
-        if pdf_copy is not None:
-            self._record_export_audit(pdf_copy, None, "pdf")
-
+        out_path = Path(path)
+        if out_path.suffix.lower() != ".pdf":
+            out_path = out_path.with_suffix(".pdf")
+        try:
+            from ..export.pdf import export_client_pdf
+            out = export_client_pdf(
+                self.client_id, out_path,
+                declared_income=self._declared_income(),
+            )
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Export failed", str(e))
+            return
+        auto_copy = self._auto_save_copy(out, "pdf")
+        self._record_export_audit(out, auto_copy, "pdf")
         message = f"Saved to:\n{out}"
         if auto_copy is not None:
             message += f"\n\nA copy was also filed under this client:\n{auto_copy}"
-        if pdf_copy is not None:
-            message += f"\n\nCompliance PDF:\n{pdf_copy}"
         QMessageBox.information(self, "Export complete", message)
-
         if hasattr(self, "exports_panel"):
             self.exports_panel.refresh()
 
@@ -1080,34 +1041,6 @@ class ClientDetailView(QWidget):
             return None
         return target
 
-    def _auto_save_pdf(self) -> Path | None:
-        """Render an always-on PDF snapshot into ``{client_folder}/exports/``.
-
-        Used for data-compliance: every export produces a PDF regardless of
-        the user's primary choice.  Returns the PDF path, or ``None`` on
-        failure (we don't want to block the primary export).
-        """
-        try:
-            client = get_client(self.client_id)
-        except ClientError:
-            return None
-        folder = Path(client.folder_path)
-        exports = folder / "exports"
-        try:
-            exports.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return None
-        stamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-        target = exports / f"{stamp}-affordability.pdf"
-        try:
-            from ..export.pdf import export_client_pdf
-            export_client_pdf(
-                self.client_id, target,
-                declared_income=self._declared_income(),
-            )
-        except Exception:  # noqa: BLE001 — compliance copy is best-effort
-            return None
-        return target
 
     def _record_export_audit(
         self,
