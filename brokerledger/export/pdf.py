@@ -26,13 +26,20 @@ _BRAND_PURPLE = "#4A1766"
 _BRAND_MAGENTA = "#D63A91"
 
 
-def _html_cover(client: Client, user_label: str) -> str:
+def _html_cover(client: Client, user_label: str, accounts: list[tuple[str, str]]) -> str:
     ref = escape(client.reference or "")
     name = escape(client.display_name)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     user = escape(user_label)
+    account_rows = "".join(
+        f"<li>{escape(bank or '—')} — <span style='color:#555'>{escape(src)}</span></li>"
+        for bank, src in accounts
+    ) or "<li style='color:#777'>No statements imported.</li>"
     return f"""
     <div style="margin-bottom:18pt">
+      <div style="color:{_BRAND_MAGENTA};font-size:10pt;letter-spacing:0.5pt">
+        MORTGAGE BROKER AFFORDABILITY ASSISTANT
+      </div>
       <h1 style="color:{_BRAND_PURPLE};margin:0;padding:0">
         Affordability Report
       </h1>
@@ -45,7 +52,11 @@ def _html_cover(client: Client, user_label: str) -> str:
           <b>Client:</b> {name}
         </div>
         <div style="color:#333;font-size:11pt">
-          <b>Reference:</b> {ref or '—'}
+          <b>System reference:</b> {ref or '—'}
+        </div>
+        <div style="margin-top:6pt;color:#333;font-size:11pt">
+          <b>Accounts covered:</b>
+          <ul style="margin:4pt 0 0 0;padding-left:16pt">{account_rows}</ul>
         </div>
       </div>
     </div>
@@ -159,21 +170,21 @@ def _html_transactions(client_id: int, client_name: str) -> str:
     """
 
 
-def _html_audit(client: Client, user_label: str) -> str:
+def _html_audit(
+    client: Client,
+    user_label: str,
+    stmts: list[Statement] | None = None,
+) -> str:
     rows: list[str] = []
-    with session_scope() as s:
-        stmts = s.execute(
-            select(Statement)
-            .where(Statement.client_id == client.id)
-            .order_by(Statement.imported_at.asc())
-        ).scalars().all()
+
+    def _build_rows(s: object, stmt_list: list[Statement]) -> None:
         verifier_cache: dict[int, str] = {}
-        for st in stmts:
+        for st in stmt_list:
             verifier = ""
             if st.verified_by is not None:
                 verifier = verifier_cache.get(st.verified_by) or ""
                 if not verifier:
-                    u = s.get(User, st.verified_by)
+                    u = s.get(User, st.verified_by)  # type: ignore[union-attr]
                     verifier = u.username if u else f"user#{st.verified_by}"
                     verifier_cache[st.verified_by] = verifier
             rows.append(
@@ -185,6 +196,18 @@ def _html_audit(client: Client, user_label: str) -> str:
                 f"<td>{escape(st.verified_at.isoformat() if st.verified_at else '')}</td>"
                 f"</tr>"
             )
+
+    if stmts is not None:
+        with session_scope() as s:
+            _build_rows(s, stmts)
+    else:
+        with session_scope() as s:
+            fetched = s.execute(
+                select(Statement)
+                .where(Statement.client_id == client.id)
+                .order_by(Statement.imported_at.asc())
+            ).scalars().all()
+            _build_rows(s, fetched)
     return f"""
     <h2 style="color:{_BRAND_PURPLE};page-break-before:always">Audit trail</h2>
     <p style="color:#555;margin-top:0">
@@ -231,6 +254,13 @@ def export_client_pdf(
         if current is not None:
             u = s.get(User, current.id)
             user_label = f"{u.username} ({u.role})" if u else current.username
+        stmt_list = s.execute(
+            select(Statement)
+            .where(Statement.client_id == client_id)
+            .order_by(Statement.imported_at.asc())
+        ).scalars().all()
+        accounts = [(st.bank_profile or "", st.original_name) for st in stmt_list]
+        stmt_snaps = list(stmt_list)
         client_snap = Client(
             id=client.id,
             display_name=client.display_name,
@@ -244,11 +274,11 @@ def export_client_pdf(
     html = (
         "<html><body style='font-family:Helvetica,Arial,sans-serif;"
         "font-size:10pt;color:#1F1030'>"
-        + _html_cover(client_snap, user_label)
+        + _html_cover(client_snap, user_label, accounts)
         + _html_summary(report)
         + _html_category_totals(report)
         + _html_transactions(client_id, client_snap.display_name)
-        + _html_audit(client_snap, user_label)
+        + _html_audit(client_snap, user_label, stmt_snaps)
         + "</body></html>"
     )
 
