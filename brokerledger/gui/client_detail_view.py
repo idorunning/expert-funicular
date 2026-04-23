@@ -42,25 +42,12 @@ from ..db.models import AuditLog, Statement, Transaction, User
 from ..categorize.taxonomy import (
     COMMITTED_CATEGORIES,
     DISCRETIONARY_CATEGORIES,
-    EXCLUDED_CATEGORIES,
-    GROUP_EXCLUDED,
-    GROUP_INCOME,
-    INCOME_CATEGORIES,
-    group_of,
 )
 
 from .theme import SUCCESS
 from .widgets.dropzone import DropZone
 from .workers.ingest_worker import run_ingest_in_thread
 from .workers.recategorize_worker import run_recategorize_in_thread
-
-
-_ALL_CATEGORIES: tuple[str, ...] = tuple(
-    list(COMMITTED_CATEGORIES)
-    + list(DISCRETIONARY_CATEGORIES)
-    + list(INCOME_CATEGORIES)
-    + list(EXCLUDED_CATEGORIES)
-)
 
 
 def _months_ago(anchor: date, months: int) -> date:
@@ -383,45 +370,29 @@ class ClientDetailView(QWidget):
         form.addRow("", self._wrap(range_row))
         outer.addLayout(form)
 
-        grid = QFormLayout()
+        headline = QFormLayout()
         self.l_period = QLabel("—")
         self.l_income = QLabel("—")
-        self.l_committed = QLabel("—")
-        self.l_discretionary = QLabel("—")
         self.l_outgoings = QLabel("—")
         self.l_net = QLabel("—")
-        self.l_monthly_income = QLabel("—")
-        self.l_monthly_net = QLabel("—")
-        grid.addRow("Period", self.l_period)
-        grid.addRow("Income (total)", self.l_income)
-        grid.addRow("Committed (total)", self.l_committed)
-        grid.addRow("Discretionary (total)", self.l_discretionary)
-        grid.addRow("Outgoings (total)", self.l_outgoings)
-        grid.addRow("Net disposable (total)", self.l_net)
-        grid.addRow("Monthly income", self.l_monthly_income)
-        grid.addRow("Monthly net disposable", self.l_monthly_net)
-        outer.addLayout(grid)
+        for lbl in (self.l_income, self.l_outgoings, self.l_net):
+            lbl.setStyleSheet("font-weight:600")
+        headline.addRow("Period", self.l_period)
+        headline.addRow("Income (total)", self.l_income)
+        headline.addRow("Outgoings (total)", self.l_outgoings)
+        headline.addRow("Net disposable (total)", self.l_net)
+        outer.addLayout(headline)
 
-        breakdown_label = QLabel("<b>Category breakdown</b>  "
-                                 "<span style='color:#6B6679'>— updates as categories are assigned</span>")
-        outer.addWidget(breakdown_label)
-
-        self.category_table = QTableWidget()
-        self.category_table.setColumnCount(4)
-        self.category_table.setHorizontalHeaderLabels(["Category", "Group", "Count", "Total"])
-        self.category_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.category_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.category_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.category_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.category_table.verticalHeader().setVisible(False)
-        self.category_table.setAlternatingRowColors(True)
-        self.category_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.category_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.category_table.setMinimumHeight(220)
-        outer.addWidget(self.category_table)
-
-        self._category_rows: dict[str, int] = {}
-        self._populate_category_rows()
+        self._category_value_labels: dict[str, QLabel] = {}
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+        columns.addWidget(self._build_category_column(
+            "Committed expenditure", COMMITTED_CATEGORIES
+        ), stretch=1)
+        columns.addWidget(self._build_category_column(
+            "Discretionary expenditure", DISCRETIONARY_CATEGORIES
+        ), stretch=1)
+        outer.addLayout(columns)
 
         buttons = QHBoxLayout()
         recalculate_btn = QPushButton("Recalculate")
@@ -447,21 +418,24 @@ class ClientDetailView(QWidget):
 
         return group
 
-    def _populate_category_rows(self) -> None:
-        self.category_table.setRowCount(len(_ALL_CATEGORIES))
-        self._category_rows.clear()
-        for idx, cat in enumerate(_ALL_CATEGORIES):
-            self._category_rows[cat] = idx
-            name_item = QTableWidgetItem(cat)
-            group_item = QTableWidgetItem(group_of(cat))
-            count_item = QTableWidgetItem("0")
-            count_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            total_item = QTableWidgetItem("£0.00")
-            total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.category_table.setItem(idx, 0, name_item)
-            self.category_table.setItem(idx, 1, group_item)
-            self.category_table.setItem(idx, 2, count_item)
-            self.category_table.setItem(idx, 3, total_item)
+    def _build_category_column(self, title: str, categories: tuple[str, ...]) -> QGroupBox:
+        box = QGroupBox(title)
+        form = QFormLayout(box)
+        form.setContentsMargins(12, 12, 12, 12)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(8)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        for cat in categories:
+            value = QLabel("£0.00")
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            value.setStyleSheet(
+                "padding:4px 8px; border:1px solid #D9D3E1; border-radius:4px; "
+                "background:#FFFFFF; min-width:120px"
+            )
+            self._category_value_labels[cat] = value
+            form.addRow(QLabel(cat), value)
+        return box
 
     def _wrap(self, inner_layout) -> QWidget:
         w = QWidget()
@@ -510,25 +484,17 @@ class ClientDetailView(QWidget):
         else:
             self.l_period.setText("—")
         self.l_income.setText(f"£{report.income_total:,.2f}")
-        self.l_committed.setText(f"£{report.committed_total:,.2f}")
-        self.l_discretionary.setText(f"£{report.discretionary_total:,.2f}")
         self.l_outgoings.setText(f"£{report.outgoings_total:,.2f}")
         self.l_net.setText(f"£{report.net_disposable:,.2f}")
-        self.l_monthly_income.setText(f"£{report.monthly_income:,.2f}")
-        self.l_monthly_net.setText(f"£{report.monthly_net_disposable:,.2f}")
         self._populate_breakdown_from_report(report)
         if hasattr(self, "statements_table"):
             self._refresh_statements_table()
 
     def _populate_breakdown_from_report(self, report) -> None:
-        for cat, row in self._category_rows.items():
+        for cat, label in self._category_value_labels.items():
             totals = report.per_category.get(cat)
-            if totals is None:
-                count, total = 0, Decimal("0.00")
-            else:
-                count, total = totals.count, totals.total
-            self.category_table.item(row, 2).setText(f"{count}")
-            self.category_table.item(row, 3).setText(f"£{total:,.2f}")
+            total = totals.total if totals is not None else Decimal("0.00")
+            label.setText(f"£{total:,.2f}")
 
     def _declared_income(self) -> Decimal | None:
         raw = self.declared.text().strip()
