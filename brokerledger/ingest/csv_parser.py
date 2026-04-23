@@ -115,9 +115,8 @@ def parse_csv(path: Path) -> list[RawTransaction]:
         if not desc:
             continue
         amount: Decimal | None = None
-        if amount_col is not None:
-            amount = _parse_amount(row[amount_col])
-        if amount is None and debit_col is not None:
+        # Prefer explicit debit/credit columns — unambiguous sign.
+        if debit_col is not None:
             dv = _parse_amount(row[debit_col])
             if dv is not None and dv != 0:
                 amount = -abs(dv)
@@ -125,6 +124,9 @@ def parse_csv(path: Path) -> list[RawTransaction]:
             cv = _parse_amount(row[credit_col])
             if cv is not None and cv != 0:
                 amount = abs(cv)
+        # Single amount column is the fallback.
+        if amount is None and amount_col is not None:
+            amount = _parse_amount(row[amount_col])
         if amount is None:
             continue
         balance = _parse_amount(row[balance_col]) if balance_col is not None else None

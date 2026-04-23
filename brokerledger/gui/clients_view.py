@@ -190,7 +190,7 @@ class ClientsView(QWidget):
         self.settings_action.triggered.connect(self.settings_requested.emit)
         self.training_action = self._menu.addAction("AI Training Zone…")
         self.training_action.triggered.connect(self.training_requested.emit)
-        self.admin_action = self._menu.addAction("Admin (manage users)…")
+        self.admin_action = self._menu.addAction("Manage staff…")
         self.admin_action.triggered.connect(self.admin_requested.emit)
         self.audit_action = self._menu.addAction("Audit log…")
         self.audit_action.triggered.connect(self.audit_log_requested.emit)
@@ -286,7 +286,10 @@ class ClientsView(QWidget):
                 f"<span style='color:#555'>Signed in as <b>{label}</b> ({cu.role})</span>"
             )
             is_admin = cu.role == "admin"
-            self.admin_action.setVisible(is_admin)
+            is_broker = cu.role == "broker"
+            # Admins and brokers both get access to the staff-management view;
+            # brokers see it filtered to their own admin_staff.
+            self.admin_action.setVisible(is_admin or is_broker)
             self.audit_action.setVisible(is_admin)
             self.show_deleted.setVisible(is_admin)
             if not is_admin:
@@ -508,6 +511,11 @@ class ClientsView(QWidget):
             menu.addAction(restore_act)
 
         menu.addSeparator()
+        exports_act = QAction("View past exports…", self)
+        exports_act.triggered.connect(self._view_exports_selected)
+        menu.addAction(exports_act)
+
+        menu.addSeparator()
         reassign_act = QAction("Reassign to…", self)
         reassign_act.triggered.connect(self._reassign_selected)
         reassign_act.setEnabled(is_admin)
@@ -519,6 +527,20 @@ class ClientsView(QWidget):
         menu.addAction(purge_act)
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _view_exports_selected(self) -> None:
+        rec = self._selected_record()
+        if rec is None:
+            return
+        # Lazy import keeps clients_view startup light.
+        from .widgets.exports_panel import ExportsDialog
+        dlg = ExportsDialog(
+            client_id=rec.id,
+            client_name=rec.display_name,
+            folder_path=rec.folder_path,
+            parent=self,
+        )
+        dlg.exec()
 
     def _rename_selected(self) -> None:
         rec = self._selected_record()

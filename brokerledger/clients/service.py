@@ -114,6 +114,20 @@ def _visible_broker_ids(user: CurrentUser, session) -> set[int] | None:
     return set()
 
 
+def _require_client_in_scope(client: Client, user: CurrentUser, session) -> None:
+    """Raise :class:`ClientError` if ``user`` can't operate on ``client``.
+
+    Admins bypass the check.  Brokers and admin-staff must find the client
+    within their visibility scope (mirrors ``list_clients``).
+    """
+    scope = _visible_broker_ids(user, session)
+    if scope is None:
+        return
+    if client.created_by in scope:
+        return
+    raise ClientError("This client is outside your access scope.")
+
+
 def create_client(display_name: str, reference: str | None = None) -> ClientRecord:
     user = require_login()
     display_name = display_name.strip()
@@ -180,11 +194,12 @@ def list_clients(
 
 
 def get_client(client_id: int) -> ClientRecord:
-    require_login()
+    user = require_login()
     with session_scope() as s:
         c = s.get(Client, client_id)
         if c is None:
             raise ClientError("Client not found")
+        _require_client_in_scope(c, user, s)
         names = _owner_name_map(s, {c.created_by} if c.created_by else set())
         return _record(c, owner_name=names.get(c.created_by) if c.created_by else None)
 
@@ -198,6 +213,7 @@ def rename_client(client_id: int, new_name: str) -> ClientRecord:
         c = s.get(Client, client_id)
         if c is None:
             raise ClientError("Client not found")
+        _require_client_in_scope(c, user, s)
         c.display_name = new_name
         s.add(AuditLog(user_id=user.id, action="rename_client", entity_type="client", entity_id=c.id,
                        detail_json=json.dumps({"display_name": new_name})))
@@ -212,6 +228,10 @@ def archive_client(client_id: int) -> None:
         c = s.get(Client, client_id)
         if c is None:
             raise ClientError("Client not found")
+        _require_client_in_scope(c, user, s)
+        # Admin staff are view-only; they cannot change client status.
+        if user.role == "admin_staff":
+            raise ClientError("Admin staff can view clients but not change their status.")
         c.archived_at = utcnow()
         s.add(AuditLog(user_id=user.id, action="archive_client", entity_type="client", entity_id=c.id))
         s.commit()
@@ -224,6 +244,9 @@ def restore_client(client_id: int) -> ClientRecord:
         c = s.get(Client, client_id)
         if c is None:
             raise ClientError("Client not found")
+        _require_client_in_scope(c, user, s)
+        if user.role == "admin_staff":
+            raise ClientError("Admin staff can view clients but not change their status.")
         # If the client was soft-deleted, only administrators may restore.
         if c.deleted_at is not None and user.role != "admin":
             raise ClientError("Only an administrator can restore a deleted client.")

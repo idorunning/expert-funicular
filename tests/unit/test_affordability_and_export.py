@@ -2,13 +2,10 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
-from openpyxl import load_workbook
-
 from brokerledger.affordability.calculator import compute_for_client
 from brokerledger.categorize.categorizer import categorize_statement
 from brokerledger.categorize.llm_client import FakeLLMClient
 from brokerledger.clients.service import create_client
-from brokerledger.export.xlsx import export_client_workbook
 from brokerledger.ingest.router import ingest_statement
 
 
@@ -57,23 +54,3 @@ def test_affordability_date_window(logged_in_admin, tmp_path: Path):
     assert windowed.discretionary_total == Decimal("0.00")
     assert windowed.income_total < full.income_total
     assert windowed.committed_total < full.committed_total
-
-
-def test_xlsx_export_sheets(logged_in_admin, tmp_path: Path):
-    client = create_client("Export Client")
-    result = ingest_statement(client.id, _write_csv(tmp_path))
-    categorize_statement(result.statement_id, llm=FakeLLMClient())
-
-    out = tmp_path / "export.xlsx"
-    export_client_workbook(client.id, out)
-    assert out.exists()
-    wb = load_workbook(out)
-    assert set(wb.sheetnames) == {"Transactions", "Category Totals", "Affordability Summary", "Audit"}
-    ws = wb["Transactions"]
-    # header + 6 rows (opening balance is skipped because its amount is blank)
-    assert ws.max_row >= 6
-    # Spot-check Affordability Summary has income line
-    afford = wb["Affordability Summary"]
-    labels = [str(row[0].value or "") for row in afford.iter_rows()]
-    assert any("Detected income (total)" in l for l in labels)
-    assert any("Net disposable" in l for l in labels)

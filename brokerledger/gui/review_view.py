@@ -1,6 +1,7 @@
 """Review view — table of transactions with inline category editing."""
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
@@ -26,7 +27,7 @@ from ..categorize.memory import apply_correction
 from ..categorize.siblings import apply_auto_siblings
 from ..categorize.taxonomy import group_of, user_visible_categories
 from ..db.engine import session_scope
-from ..db.models import Transaction, utcnow
+from ..db.models import AuditLog, Transaction, utcnow
 from .widgets.category_delegate import CategoryDelegate
 from .widgets.category_grid_picker import CategoryGridDelegate
 from .widgets.sibling_confirm_dialog import SiblingConfirmDialog
@@ -87,6 +88,7 @@ class TransactionsModel(QAbstractTableModel):
         self.client_id = client_id
         self.flagged_only = flagged_only
         self._rows: list[dict] = []
+        self._pending_undo: dict[int, dict] = {}  # tx_id -> {category, source, confidence}
         self.reload()
 
     def reload(self) -> None:
@@ -112,9 +114,11 @@ class TransactionsModel(QAbstractTableModel):
                     "direction":   r.direction,
                     "flags":       deserialize_flags(r.flags),
                     "reasoning":   r.reasoning or "",
+                    "disregarded": False,
                 }
                 for r in rows
             ]
+            self._pending_undo.clear()
             self.endResetModel()
 
     # ------------------------------------------------------------------
@@ -154,6 +158,8 @@ class TransactionsModel(QAbstractTableModel):
             if col == COL_CERT:    return confidence_tier(row["confidence"], row["source"])
             if col == COL_FLAGGED: return "!" if row["needs_review"] else ""
         if role == Qt.ItemDataRole.BackgroundRole:
+            if row.get("disregarded"):
+                return QBrush(QColor(220, 220, 220))  # grey background for disregarded
             if col == COL_CERT:
                 tier = confidence_tier(row["confidence"], row["source"])
                 if tier in _TIER_BG:
@@ -167,6 +173,8 @@ class TransactionsModel(QAbstractTableModel):
             if row["needs_review"]:
                 return QBrush(QColor(255, 246, 225))
         if role == Qt.ItemDataRole.ForegroundRole:
+            if row.get("disregarded"):
+                return QBrush(QColor(140, 140, 140))  # dim grey text for disregarded
             if col == COL_CERT:
                 tier = confidence_tier(row["confidence"], row["source"])
                 if tier in _TIER_FG:
@@ -319,12 +327,15 @@ class TransactionsModel(QAbstractTableModel):
                 "direction":   tx.direction,
                 "flags":       deserialize_flags(tx.flags),
                 "reasoning":   tx.reasoning or "",
+                "disregarded": False,
             }
         # Respect the flagged-only filter.
         if self.flagged_only and not payload["needs_review"]:
             return
         for i, row in enumerate(self._rows):
             if row["id"] == tx_id:
+                # Preserve the disregarded flag when updating an existing row
+                payload["disregarded"] = row.get("disregarded", False)
                 self._rows[i] = payload
                 tl = self.index(i, 0)
                 br = self.index(i, self.columnCount() - 1)
@@ -427,9 +438,84 @@ class TransactionsModel(QAbstractTableModel):
         Sets category to ``Transfer/Excluded`` (excluded from affordability)
         and source to ``'user'``, so the merchant rule is learned and future
         imports from the same source auto-disregard. Returns count updated.
+
+        Changes are marked as reversible via undo_last_disregard().
         """
         _DISREGARD_CAT = "Transfer/Excluded"
-        return self.bulk_apply_category(row_indices, _DISREGARD_CAT)
+        # Store state before disregarding so undo can revert
+        for i in row_indices:
+            if 0 <= i < len(self._rows):
+                row = self._rows[i]
+                self._pending_undo[row["id"]] = {
+                    "category": row["category"],
+                    "source": row["source"],
+                    "confidence": row["confidence"],
+                    "needs_review": row["needs_review"],
+                }
+        # Disregard the rows
+        updated = self.bulk_apply_category(row_indices, _DISREGARD_CAT)
+        # Mark rows as disregarded (greyed out)
+        if updated:
+            for i in row_indices:
+                if 0 <= i < len(self._rows):
+                    self._rows[i]["disregarded"] = True
+                    top_left = self.index(i, 0)
+                    bottom_right = self.index(i, self.columnCount() - 1)
+                    self.dataChanged.emit(top_left, bottom_right, [Qt.ItemDataRole.BackgroundRole, Qt.ItemDataRole.ForegroundRole])
+        return updated
+
+    def undo_last_disregard(self) -> int:
+        """Revert the last disregard action.
+
+        Restores all disregarded rows to their previous category, source,
+        and confidence. Returns the count of rows reverted.
+        """
+        if not self._pending_undo:
+            return 0
+        user = require_login()
+        reverted = 0
+        for i, row in enumerate(self._rows):
+            tx_id = row["id"]
+            if tx_id not in self._pending_undo:
+                continue
+            prev_state = self._pending_undo[tx_id]
+            prev_category = prev_state["category"]
+            # If the previous category was empty, revert to flagged state
+            if not prev_category:
+                prev_category = row["category"]  # Keep current if no previous
+            with session_scope() as s:
+                tx = s.get(Transaction, tx_id)
+                if tx is None:
+                    continue
+                # Revert to the previous category without recording a new correction
+                # so we don't create conflicting audit entries
+                tx.category = prev_state["category"] or None
+                tx.category_group = group_of(prev_state["category"]) if prev_state["category"] else None
+                tx.source = prev_state["source"]
+                tx.confidence = prev_state["confidence"]
+                tx.needs_review = prev_state["needs_review"]
+                tx.updated_at = utcnow()
+                s.add(AuditLog(
+                    user_id=user.id,
+                    action="undo_disregard",
+                    entity_type="transaction",
+                    entity_id=tx_id,
+                    detail_json=json.dumps({"reverted_to": prev_state["category"]}),
+                ))
+                s.commit()
+            # Update in-memory row
+            row["category"] = prev_state["category"]
+            row["source"] = prev_state["source"]
+            row["confidence"] = prev_state["confidence"]
+            row["needs_review"] = prev_state["needs_review"]
+            row["group"] = group_of(prev_state["category"]) if prev_state["category"] else ""
+            row["disregarded"] = False
+            top_left = self.index(i, 0)
+            bottom_right = self.index(i, self.columnCount() - 1)
+            self.dataChanged.emit(top_left, bottom_right, [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.BackgroundRole, Qt.ItemDataRole.ForegroundRole])
+            reverted += 1
+        self._pending_undo.clear()
+        return reverted
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -562,6 +648,16 @@ class ReviewView(QWidget):
         self.disregard_btn.clicked.connect(self._disregard_selected)
         toolbar.addWidget(self.disregard_btn)
 
+        # Undo disregard — reverts the last disregard action.
+        self.undo_disregard_btn = QPushButton("↶  Undo last disregard")
+        self.undo_disregard_btn.setToolTip(
+            "Undo the last disregard action — restores the rows to their "
+            "previous category and state."
+        )
+        self.undo_disregard_btn.setEnabled(False)
+        self.undo_disregard_btn.clicked.connect(self._undo_disregard)
+        toolbar.addWidget(self.undo_disregard_btn)
+
         # Confirm selected — marks the selected rows as user-confirmed without
         # changing their current category.
         self.confirm_btn = QPushButton("✓  Confirm selected")
@@ -670,6 +766,11 @@ class ReviewView(QWidget):
         self.model.dataChanged.connect(lambda *_: self._maybe_prompt_siblings())
         self.table.selectionModel().selectionChanged.connect(self._on_selection_changed)
 
+        # Sticky flag — once we've seen a flagged transaction we remember it
+        # so the banner can flip to its "all clear" state when the last flag
+        # is cleared, rather than silently disappearing.
+        self._ever_had_flags = False
+
         self.refresh_summary()
 
         # Apply initial filter state without retriggering signals.
@@ -677,14 +778,6 @@ class ReviewView(QWidget):
             self.flag_only.blockSignals(True)
             self.flag_only.setChecked(True)
             self.flag_only.blockSignals(False)
-
-        if flagged_count is not None and flagged_count > 0:
-            noun = "transaction" if flagged_count == 1 else "transactions"
-            self.flagged_banner.setText(
-                f"⚑ {flagged_count} {noun} need your review. "
-                "Everything else was assigned automatically with high certainty."
-            )
-            self.flagged_banner.setVisible(True)
 
     # ------------------------------------------------------------------
     # Toolbar actions
@@ -783,7 +876,19 @@ class ReviewView(QWidget):
         row_nums = sorted({i.row() for i in indices})
         updated = self.model.disregard_rows(row_nums)
         if updated:
+            self._update_undo_button()
             self.refresh_summary()
+
+    def _undo_disregard(self) -> None:
+        reverted = self.model.undo_last_disregard()
+        if reverted:
+            self._update_undo_button()
+            self.refresh_summary()
+
+    def _update_undo_button(self) -> None:
+        """Enable/disable undo button based on pending undo state."""
+        has_pending = bool(self.model._pending_undo)
+        self.undo_disregard_btn.setEnabled(has_pending)
 
     def _apply_category_to_selected(self) -> None:
         indices = self.table.selectionModel().selectedRows()
@@ -832,6 +937,42 @@ class ReviewView(QWidget):
     # Summary bar
     # ------------------------------------------------------------------
 
+    _BANNER_RED_QSS = (
+        "QLabel { background-color: #F5E6F0; color: #5A1044;"
+        " border: 1px solid #C33E8F; border-radius: 6px;"
+        " padding: 10px 14px; font-weight: 600; }"
+    )
+    _BANNER_GREEN_QSS = (
+        "QLabel { background-color: #E6F4EA; color: #145f28;"
+        " border: 1px solid #6AC87A; border-radius: 6px;"
+        " padding: 10px 14px; font-weight: 600; }"
+    )
+
+    def _update_banner(self, flagged: int) -> None:
+        """Drive the red/green review banner from the current flag count.
+
+        * flagged > 0 → red banner with the count, sticky state recorded.
+        * flagged == 0 and we've previously seen flags → green "all clear".
+        * Otherwise (nothing ever flagged) → hidden.
+        """
+        if flagged > 0:
+            self._ever_had_flags = True
+            noun = "transaction" if flagged == 1 else "transactions"
+            self.flagged_banner.setText(
+                f"⚑ {flagged} {noun} need your review. "
+                "Everything else was assigned automatically with high certainty."
+            )
+            self.flagged_banner.setStyleSheet(self._BANNER_RED_QSS)
+            self.flagged_banner.setVisible(True)
+        elif self._ever_had_flags:
+            self.flagged_banner.setText(
+                "✓ All flagged transactions have been reviewed — nicely done!"
+            )
+            self.flagged_banner.setStyleSheet(self._BANNER_GREEN_QSS)
+            self.flagged_banner.setVisible(True)
+        else:
+            self.flagged_banner.setVisible(False)
+
     def refresh_summary(self) -> None:
         with session_scope() as s:
             total = s.execute(
@@ -849,13 +990,4 @@ class ReviewView(QWidget):
             f"<span style='color:#a52d1e'><b>{tiers['Low']}</b> low</span> &middot; "
             f"<b style='color:#b4580a'>{flagged} flagged</b></span>"
         )
-        # Update the banner count if it's still visible.
-        if self.flagged_banner.isVisible() and flagged == 0:
-            self.flagged_banner.setText(
-                "✓ All flagged transactions have been reviewed — nicely done!"
-            )
-            self.flagged_banner.setStyleSheet(
-                "QLabel { background-color: #E6F4EA; color: #145f28;"
-                " border: 1px solid #6AC87A; border-radius: 6px;"
-                " padding: 10px 14px; font-weight: 600; }"
-            )
+        self._update_banner(flagged)

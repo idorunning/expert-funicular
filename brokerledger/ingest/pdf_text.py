@@ -222,10 +222,8 @@ def _parse_via_tables(path: Path) -> tuple[list[RawTransaction], int, float]:
 
                     # Resolve signed amount from whichever columns are available.
                     amount: Decimal | None = None
-                    if amount_col is not None:
-                        amount = _parse_amount(row[amount_col])
-
-                    if amount is None and debit_col is not None:
+                    # Prefer explicit debit/credit columns — unambiguous sign.
+                    if debit_col is not None:
                         dv = _parse_amount(row[debit_col])
                         if dv is not None and dv != 0:
                             amount = -abs(dv)
@@ -234,6 +232,10 @@ def _parse_via_tables(path: Path) -> tuple[list[RawTransaction], int, float]:
                         cv = _parse_amount(row[credit_col])
                         if cv is not None and cv != 0:
                             amount = abs(cv)
+
+                    # Single amount column is the fallback.
+                    if amount is None and amount_col is not None:
+                        amount = _parse_amount(row[amount_col])
 
                     if amount is None:
                         continue
@@ -291,7 +293,7 @@ def _parse_via_lines(path: Path) -> tuple[list[RawTransaction], int, float]:
 
         if re.search(r"\bCR\b", rest, re.IGNORECASE):
             amount = abs(amount)
-        elif amount is not None and amount > 0 and not amount_str.startswith("-"):
+        elif re.search(r"\bDR\b", rest, re.IGNORECASE):
             amount = -abs(amount)
 
         txs.append(RawTransaction(
