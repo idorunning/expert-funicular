@@ -7,7 +7,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from PySide6.QtCore import QDate, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QDate, Qt, QThread, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QScrollArea,
     QTableWidget,
@@ -43,25 +42,12 @@ from ..db.models import AuditLog, Statement, Transaction, User
 from ..categorize.taxonomy import (
     COMMITTED_CATEGORIES,
     DISCRETIONARY_CATEGORIES,
-    EXCLUDED_CATEGORIES,
-    GROUP_EXCLUDED,
-    GROUP_INCOME,
-    INCOME_CATEGORIES,
-    group_of,
 )
 
-from .theme import BRAND_MAGENTA, BRAND_PURPLE_SOFT, SUCCESS
+from .theme import SUCCESS
 from .widgets.dropzone import DropZone
 from .workers.ingest_worker import run_ingest_in_thread
 from .workers.recategorize_worker import run_recategorize_in_thread
-
-
-_ALL_CATEGORIES: tuple[str, ...] = tuple(
-    list(COMMITTED_CATEGORIES)
-    + list(DISCRETIONARY_CATEGORIES)
-    + list(INCOME_CATEGORIES)
-    + list(EXCLUDED_CATEGORIES)
-)
 
 
 def _months_ago(anchor: date, months: int) -> date:
@@ -160,18 +146,6 @@ class ClientDetailView(QWidget):
         review.clicked.connect(self.review_requested.emit)
         actions.addWidget(review)
         layout.addLayout(actions)
-
-        self.progress = QProgressBar()
-        self.progress.setVisible(False)
-        self.progress.setMinimumHeight(22)
-        self.progress.setFormat("  %p%")
-        self.progress.setTextVisible(True)
-        layout.addWidget(self.progress)
-
-        self.progress_label = QLabel("")
-        self.progress_label.setVisible(False)
-        self.progress_label.setWordWrap(True)
-        layout.addWidget(self.progress_label)
 
         self.file_log = QListWidget()
         self.file_log.setMaximumHeight(160)
@@ -358,11 +332,6 @@ class ClientDetailView(QWidget):
         outer.setContentsMargins(12, 18, 12, 12)
         outer.setSpacing(10)
 
-        self.live_status = QLabel("")
-        self.live_status.setWordWrap(True)
-        self.live_status.setVisible(False)
-        outer.addWidget(self.live_status)
-
         form = QFormLayout()
         self.declared = QLineEdit()
         self.declared.setPlaceholderText("Override declared income (optional)")
@@ -401,48 +370,29 @@ class ClientDetailView(QWidget):
         form.addRow("", self._wrap(range_row))
         outer.addLayout(form)
 
-        grid = QFormLayout()
+        headline = QFormLayout()
         self.l_period = QLabel("—")
         self.l_income = QLabel("—")
-        self.l_committed = QLabel("—")
-        self.l_discretionary = QLabel("—")
         self.l_outgoings = QLabel("—")
         self.l_net = QLabel("—")
-        self.l_monthly_income = QLabel("—")
-        self.l_monthly_net = QLabel("—")
-        grid.addRow("Period", self.l_period)
-        grid.addRow("Income (total)", self.l_income)
-        grid.addRow("Committed (total)", self.l_committed)
-        grid.addRow("Discretionary (total)", self.l_discretionary)
-        grid.addRow("Outgoings (total)", self.l_outgoings)
-        grid.addRow("Net disposable (total)", self.l_net)
-        grid.addRow("Monthly income", self.l_monthly_income)
-        grid.addRow("Monthly net disposable", self.l_monthly_net)
-        outer.addLayout(grid)
+        for lbl in (self.l_income, self.l_outgoings, self.l_net):
+            lbl.setStyleSheet("font-weight:600")
+        headline.addRow("Period", self.l_period)
+        headline.addRow("Income (total)", self.l_income)
+        headline.addRow("Outgoings (total)", self.l_outgoings)
+        headline.addRow("Net disposable (total)", self.l_net)
+        outer.addLayout(headline)
 
-        breakdown_label = QLabel("<b>Category breakdown</b>  "
-                                 "<span style='color:#6B6679'>— updates as categories are assigned</span>")
-        outer.addWidget(breakdown_label)
-
-        self.category_table = QTableWidget()
-        self.category_table.setColumnCount(4)
-        self.category_table.setHorizontalHeaderLabels(["Category", "Group", "Count", "Total"])
-        self.category_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.category_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.category_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.category_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.category_table.verticalHeader().setVisible(False)
-        self.category_table.setAlternatingRowColors(True)
-        self.category_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.category_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.category_table.setMinimumHeight(220)
-        outer.addWidget(self.category_table)
-
-        self._category_rows: dict[str, int] = {}
-        self._live_totals: dict[str, tuple[int, Decimal]] = {}
-        self._live_mode: bool = False
-        self._flash_timers: dict[int, QTimer] = {}
-        self._populate_category_rows()
+        self._category_value_labels: dict[str, QLabel] = {}
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+        columns.addWidget(self._build_category_column(
+            "Committed expenditure", COMMITTED_CATEGORIES
+        ), stretch=1)
+        columns.addWidget(self._build_category_column(
+            "Discretionary expenditure", DISCRETIONARY_CATEGORIES
+        ), stretch=1)
+        outer.addLayout(columns)
 
         buttons = QHBoxLayout()
         recalculate_btn = QPushButton("Recalculate")
@@ -468,21 +418,24 @@ class ClientDetailView(QWidget):
 
         return group
 
-    def _populate_category_rows(self) -> None:
-        self.category_table.setRowCount(len(_ALL_CATEGORIES))
-        self._category_rows.clear()
-        for idx, cat in enumerate(_ALL_CATEGORIES):
-            self._category_rows[cat] = idx
-            name_item = QTableWidgetItem(cat)
-            group_item = QTableWidgetItem(group_of(cat))
-            count_item = QTableWidgetItem("0")
-            count_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            total_item = QTableWidgetItem("£0.00")
-            total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.category_table.setItem(idx, 0, name_item)
-            self.category_table.setItem(idx, 1, group_item)
-            self.category_table.setItem(idx, 2, count_item)
-            self.category_table.setItem(idx, 3, total_item)
+    def _build_category_column(self, title: str, categories: tuple[str, ...]) -> QGroupBox:
+        box = QGroupBox(title)
+        form = QFormLayout(box)
+        form.setContentsMargins(12, 12, 12, 12)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(8)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        for cat in categories:
+            value = QLabel("£0.00")
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            value.setStyleSheet(
+                "padding:4px 8px; border:1px solid #D9D3E1; border-radius:4px; "
+                "background:#FFFFFF; min-width:120px"
+            )
+            self._category_value_labels[cat] = value
+            form.addRow(QLabel(cat), value)
+        return box
 
     def _wrap(self, inner_layout) -> QWidget:
         w = QWidget()
@@ -531,98 +484,17 @@ class ClientDetailView(QWidget):
         else:
             self.l_period.setText("—")
         self.l_income.setText(f"£{report.income_total:,.2f}")
-        self.l_committed.setText(f"£{report.committed_total:,.2f}")
-        self.l_discretionary.setText(f"£{report.discretionary_total:,.2f}")
         self.l_outgoings.setText(f"£{report.outgoings_total:,.2f}")
         self.l_net.setText(f"£{report.net_disposable:,.2f}")
-        self.l_monthly_income.setText(f"£{report.monthly_income:,.2f}")
-        self.l_monthly_net.setText(f"£{report.monthly_net_disposable:,.2f}")
-        if not self._live_mode:
-            self._populate_breakdown_from_report(report)
+        self._populate_breakdown_from_report(report)
         if hasattr(self, "statements_table"):
             self._refresh_statements_table()
 
     def _populate_breakdown_from_report(self, report) -> None:
-        for cat, row in self._category_rows.items():
+        for cat, label in self._category_value_labels.items():
             totals = report.per_category.get(cat)
-            if totals is None:
-                count, total = 0, Decimal("0.00")
-            else:
-                count, total = totals.count, totals.total
-            self.category_table.item(row, 2).setText(f"{count}")
-            self.category_table.item(row, 3).setText(f"£{total:,.2f}")
-
-    def _reset_live_totals(self) -> None:
-        self._live_totals = {cat: (0, Decimal("0.00")) for cat in _ALL_CATEGORIES}
-        for cat, row in self._category_rows.items():
-            self.category_table.item(row, 2).setText("0")
-            self.category_table.item(row, 3).setText("£0.00")
-
-    def _on_tx_categorized(self, category: str, group: str, amount, direction: str) -> None:
-        if not category:
-            return
-        if category not in self._category_rows:
-            # LLM returned a category we don't track — ignore for live view.
-            return
-        try:
-            amt_abs = abs(Decimal(str(amount)))
-        except (InvalidOperation, TypeError):
-            amt_abs = Decimal("0.00")
-        count, total = self._live_totals.get(category, (0, Decimal("0.00")))
-        # Credits routed to income are shown as positive too; no sign flip needed.
-        count += 1
-        total += amt_abs
-        self._live_totals[category] = (count, total)
-        row = self._category_rows[category]
-        self.category_table.item(row, 2).setText(f"{count}")
-        self.category_table.item(row, 3).setText(f"£{total:,.2f}")
-        self._flash_row(row)
-        self._update_live_status()
-
-    def _flash_row(self, row: int) -> None:
-        highlight = QBrush(QColor(BRAND_MAGENTA))
-        default = QBrush(QColor(BRAND_PURPLE_SOFT)) if row % 2 else QBrush(Qt.GlobalColor.white)
-        fg_white = QBrush(QColor("#FFFFFF"))
-        fg_default = QBrush(QColor("#1F1030"))
-        for col in range(self.category_table.columnCount()):
-            item = self.category_table.item(row, col)
-            if item is not None:
-                item.setBackground(highlight)
-                item.setForeground(fg_white)
-        existing = self._flash_timers.pop(row, None)
-        if existing is not None:
-            existing.stop()
-        t = QTimer(self)
-        t.setSingleShot(True)
-        t.timeout.connect(lambda r=row, d=default, f=fg_default: self._clear_flash(r, d, f))
-        t.start(450)
-        self._flash_timers[row] = t
-
-    def _clear_flash(self, row: int, bg: QBrush, fg: QBrush) -> None:
-        for col in range(self.category_table.columnCount()):
-            item = self.category_table.item(row, col)
-            if item is not None:
-                item.setBackground(bg)
-                item.setForeground(fg)
-        self._flash_timers.pop(row, None)
-
-    def _update_live_status(self) -> None:
-        if not self._live_mode:
-            return
-        total_count = sum(c for c, _ in self._live_totals.values())
-        self.live_status.setText(
-            f"<span style='color:{BRAND_MAGENTA};font-weight:600'>● Live</span> "
-            f"— {total_count} transaction(s) categorised so far"
-        )
-        self.live_status.setVisible(True)
-
-    def _finish_live_mode(self, ok_msg: str) -> None:
-        self._live_mode = False
-        self.live_status.setText(
-            f"<span style='color:{SUCCESS};font-weight:600'>✓ Ready for review</span> — {ok_msg}"
-        )
-        self.live_status.setVisible(True)
-        self.refresh()
+            total = totals.total if totals is not None else Decimal("0.00")
+            label.setText(f"£{total:,.2f}")
 
     def _declared_income(self) -> Decimal | None:
         raw = self.declared.text().strip()
@@ -654,11 +526,6 @@ class ClientDetailView(QWidget):
             self.file_log.addItem(item)
             self._queue_items[key] = item
             added += 1
-        if added:
-            self.progress_label.setVisible(True)
-            self.progress_label.setText(
-                f"{len(self._pending_paths)} file(s) queued. Click 'Process queued files' to start."
-            )
         self._update_buttons()
 
     def _update_buttons(self) -> None:
@@ -677,7 +544,6 @@ class ClientDetailView(QWidget):
                 self.file_log.takeItem(row)
         self._queue_items.clear()
         self._pending_paths.clear()
-        self.progress_label.setText("Queue cleared.")
         self._update_buttons()
 
     def _process_queue(self) -> None:
@@ -689,25 +555,13 @@ class ClientDetailView(QWidget):
             f"{'this file' if len(paths) == 1 else f'these {len(paths)} files'} for you.",
             tone="info",
         )
-        self.progress.setVisible(True)
-        self.progress.setRange(0, len(paths) * 100)
-        self.progress.setValue(0)
-        self._set_progress_running()
-        self.progress_label.setVisible(True)
-        self.progress_label.setText(f"Starting — {len(paths)} file(s) queued…")
-
-        self._live_mode = True
-        self._reset_live_totals()
-        self._update_live_status()
 
         thread, worker = run_ingest_in_thread(self.client_id, paths)
         self._thread = thread
         self._worker = worker
-        worker.progress.connect(self._on_progress)
         worker.file_done.connect(self._on_file_done)
         worker.error.connect(self._on_file_error)
         worker.all_done.connect(self._on_all_done)
-        worker.tx_categorized.connect(self._on_tx_categorized)
         worker.tx_persisted.connect(self.tx_persisted.emit)
         # CRITICAL: keep the Python references alive until thread.finished
         # actually fires (the event loop has fully exited). Otherwise GC may
@@ -723,20 +577,6 @@ class ClientDetailView(QWidget):
             if Path(key).name == name:
                 return item
         return None
-
-    def _set_progress_running(self) -> None:
-        self.progress.setStyleSheet("")  # default blue/system style
-
-    def _set_progress_done(self) -> None:
-        self.progress.setStyleSheet(
-            "QProgressBar::chunk { background-color: #3a9e52; }"
-        )
-
-    def _on_progress(self, done: int, total: int, message: str) -> None:
-        self.progress.setRange(0, total)
-        self.progress.setValue(done)
-        self.progress_label.setText(message)
-        self.progress_label.setVisible(True)
 
     def _on_file_done(self, result) -> None:
         # Look up the queue item by original filename via the stored path.
@@ -775,29 +615,12 @@ class ClientDetailView(QWidget):
             self.file_log.addItem(text)
 
     def _on_all_done(self, ok: int, fail: int) -> None:
-        self.progress.setRange(0, 1)
-        self.progress.setValue(1)
-        self._set_progress_done()
-        if fail:
-            self.progress_label.setText(
-                f"<span style='color:#a52d1e;font-weight:bold'>⚠ Finished with errors</span>"
-                f" — {ok} file(s) imported, {fail} failed"
-            )
-        else:
-            self.progress_label.setText(
-                f"<span style='color:#176b1a;font-weight:bold'>✓ Import complete</span>"
-                f" — {ok} file(s) imported"
-            )
         # Do NOT clear self._thread / self._worker here — the QThread event
         # loop is still running. Wait for thread.finished (see _on_thread_finished).
         self._pending_paths.clear()
         self._queue_items.clear()
         self._update_buttons()
-        self._finish_live_mode(
-            f"{ok} file(s) processed — review the category totals below or open 'Review transactions'"
-            if fail == 0
-            else f"{ok} imported, {fail} failed — review totals below"
-        )
+        self.refresh()
         self._refresh_statements_table()
         if ok > 0:
             self._notify_completion(context="statements", ok=ok, fail=fail)
@@ -936,23 +759,16 @@ class ClientDetailView(QWidget):
     def _start_recategorize(self) -> None:
         if self._thread is not None or self._recategorize_thread is not None:
             return
-        self.progress.setVisible(True)
-        self.progress.setRange(0, 0)   # indeterminate pulse until first progress signal
-        self._set_progress_running()
-        self.progress_label.setVisible(True)
-        self.progress_label.setText("Starting re-categorisation…")
-
-        self._live_mode = True
-        self._reset_live_totals()
-        self._update_live_status()
+        self._show_notice(
+            "Re-running category assignment. I'll let you know when it finishes.",
+            tone="info",
+        )
 
         thread, worker = run_recategorize_in_thread(self.client_id)
         self._recategorize_thread = thread
         self._recategorize_worker = worker
-        worker.progress.connect(self._on_progress)
         worker.done.connect(self._on_recategorize_done)
         worker.error.connect(self._on_recategorize_error)
-        worker.tx_categorized.connect(self._on_tx_categorized)
         worker.tx_persisted.connect(self.tx_persisted.emit)
         thread.finished.connect(self._on_recategorize_thread_finished)
         thread.start()
@@ -960,21 +776,10 @@ class ClientDetailView(QWidget):
         self.processing_changed.emit(True)
 
     def _on_recategorize_done(self, count: int) -> None:
-        self.progress.setRange(0, 1)
-        self.progress.setValue(1)
-        self._set_progress_done()
+        self.refresh()
         if count:
-            self.progress_label.setText(
-                f"<span style='color:#176b1a;font-weight:bold'>✓ Re-categorisation complete</span>"
-                f" — {count} transaction(s) updated"
-            )
-            self._finish_live_mode(f"{count} transaction(s) re-categorised")
             self._notify_completion(context="recategorise", updated=count)
         else:
-            self.progress_label.setText(
-                "<span style='color:#555'>No transactions needed re-categorisation.</span>"
-            )
-            self._finish_live_mode("no transactions needed updating")
             self._notify_completion(context="recategorise", updated=0)
 
     def _on_recategorize_error(self, message: str) -> None:

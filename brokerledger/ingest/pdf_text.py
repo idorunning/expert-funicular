@@ -291,9 +291,16 @@ def _parse_via_lines(path: Path) -> tuple[list[RawTransaction], int, float]:
         if amount is None or not description:
             continue
 
+        # UK bank PDFs (line-fallback path) mark credits with an explicit CR/DR
+        # suffix and show debits as bare numbers. Respect explicit markers first;
+        # when neither is present, default to debit — this matches the printed
+        # convention and avoids every un-marked purchase being mis-classed as
+        # income by the categoriser.
         if re.search(r"\bCR\b", rest, re.IGNORECASE):
             amount = abs(amount)
         elif re.search(r"\bDR\b", rest, re.IGNORECASE):
+            amount = -abs(amount)
+        elif amount > 0 and not amount_str.lstrip().startswith("-"):
             amount = -abs(amount)
 
         txs.append(RawTransaction(
