@@ -33,6 +33,34 @@ python -m brokerledger
 
 On first launch you are asked to create an admin user and (optionally) enable encryption at rest. The app then verifies Ollama is reachable and shows which models are available.
 
+## Quick access for manual testing
+
+If you want to open the app and click through it end-to-end:
+
+1. Install dependencies:
+   ```
+   pip install -e .[dev]
+   ```
+2. Start Ollama in another terminal (if not already running):
+   ```
+   ollama serve
+   ```
+3. Ensure at least one supported model is present:
+   ```
+   ollama pull gemma3:4b
+   ```
+4. Launch the GUI:
+   ```
+   python -m brokerledger
+   ```
+5. First run: create an admin account, then log in and create a test client.
+
+If you only want a quick non-GUI sanity check:
+
+```
+python -m brokerledger.cli --demo
+```
+
 ## Workflow
 
 1. **Log in** (admin or broker).
