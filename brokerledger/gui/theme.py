@@ -127,6 +127,31 @@ QPushButton[flat="true"]:hover, QPushButton#GhostButton:hover {{
     color: {BRAND_PURPLE_DARK};
 }}
 
+QPushButton#PrimaryButton {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 {BRAND_PURPLE},
+        stop:1 {BRAND_MAGENTA}
+    );
+    color: #FFFFFF;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: 700;
+    min-height: 18px;
+}}
+QPushButton#PrimaryButton:hover {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 {BRAND_MAGENTA},
+        stop:1 {BRAND_PURPLE}
+    );
+}}
+QPushButton#PrimaryButton:pressed {{
+    background-color: {BRAND_PURPLE_DARK};
+}}
+
 QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QDateEdit, QComboBox {{
     background-color: {SURFACE};
     border: 1px solid {BORDER};
